@@ -1,0 +1,18 @@
+# Workspace configuration
+#
+# Per-project Procfile templates:
+#   Create a Procfile.workspace.template in the project's path directory
+#   to customize the Procfile for that project. Available variables:
+#     $RAILS_PORT - the generated Rails server port
+#     $VITE_PORT  - the generated Vite port
+#   If no template exists, a default Rails/Sidekiq template is used.
+
+projects:
+  myproject:
+    path: ~/projects/myproject/app      # Main checkout (source of .env, etc)
+    worktree_dir: ~/projects/myproject  # Where worktrees go
+
+  # Add more projects with same structure
+  # another-project:
+  #   path: ~/projects/another/web
+  #   worktree_dir: ~/projects/another
