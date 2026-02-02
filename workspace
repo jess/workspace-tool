@@ -172,9 +172,9 @@ EOF
 
     if [[ -f "$template_file" ]]; then
         # Use project-specific template with variable substitution
-        RAILS_PORT="$rails_port" \
-        VITE_PORT="$random_port" \
-        envsubst '$RAILS_PORT $VITE_PORT' < "$template_file" > "$workspace_dir/Procfile.workspace"
+        sed -e "s/\$RAILS_PORT/$rails_port/g" \
+            -e "s/\$VITE_PORT/$random_port/g" \
+            "$template_file" > "$workspace_dir/Procfile.workspace"
     else
         # Default Rails Procfile
         cat > "$workspace_dir/Procfile.workspace" << EOF

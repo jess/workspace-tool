@@ -10,17 +10,41 @@ A tool for managing multiple git worktree-based development workspaces across Ra
 - Per-project Procfile templates
 - Automatic `.env` copying with workspace-specific overrides
 
+## Assumptions
+
+This tool is designed for Rails projects with the following setup:
+
+### Environment files
+
+Your project uses a `.env` file for configuration. The tool copies this file to each workspace and adds workspace-specific variables.
+
+### Vite
+
+Your project uses Vite for asset compilation. Each workspace gets a unique `VITE_RUBY_PORT` to avoid conflicts.
+
+### Session store
+
+To allow multiple workspaces to run simultaneously without sharing sessions, your app should read the session cookie name from an environment variable.
+
+In `config/initializers/session_store.rb`:
+
+```ruby
+session_key = ENV.fetch("SESSION_COOKIE_NAME", "_myapp_session")
+Rails.application.config.session_store :cookie_store, key: session_key
+```
+
+Each workspace automatically gets a unique `SESSION_COOKIE_NAME` (e.g., `myapp_cookie_3102`).
+
 ## Requirements
 
 - git
 - tmux
 - overmind
-- envsubst (part of gettext)
 
 ### macOS
 
 ```bash
-brew install tmux overmind gettext
+brew install tmux overmind
 ```
 
 ## Installation

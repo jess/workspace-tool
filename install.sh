@@ -29,10 +29,6 @@ if ! command -v overmind &> /dev/null; then
     missing_deps+=("overmind")
 fi
 
-if ! command -v envsubst &> /dev/null; then
-    missing_deps+=("envsubst (gettext)")
-fi
-
 if [[ ${#missing_deps[@]} -gt 0 ]]; then
     echo -e "${RED}Missing dependencies:${NC}"
     for dep in "${missing_deps[@]}"; do
