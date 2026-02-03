@@ -166,6 +166,11 @@ SESSION_COOKIE_NAME="$session_cookie"
 VITE_RUBY_PORT=$random_port
 EOF
 
+    # Create .env.test to force Vite to compile instead of proxying to dev server
+    cat > "$workspace_dir/.env.test" << EOF
+VITE_RUBY_PORT=3037
+EOF
+
     # Create a workspace-specific Procfile
     echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
     local template_file="$PROJECT_PATH/Procfile.workspace.template"
