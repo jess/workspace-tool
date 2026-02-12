@@ -51,6 +51,36 @@ cp "$SCRIPT_DIR/workspace" "$HOME/.local/bin/workspace"
 chmod +x "$HOME/.local/bin/workspace"
 echo -e "  Installed to ~/.local/bin/workspace"
 
+# Install shell completions
+echo -e "${YELLOW}Installing shell completions...${NC}"
+
+# Detect shell and install appropriate completion
+current_shell=$(basename "$SHELL")
+
+if [[ "$current_shell" == "zsh" ]]; then
+    # Install zsh completion
+    zsh_comp_dir="${HOME}/.zsh/completions"
+    mkdir -p "$zsh_comp_dir"
+    cp "$SCRIPT_DIR/workspace.completion.zsh" "$zsh_comp_dir/_workspace"
+    echo -e "  Installed zsh completion to $zsh_comp_dir/_workspace"
+
+    # Check if the completion dir is in fpath
+    if ! zsh -c "echo \$fpath" 2>/dev/null | grep -q "$zsh_comp_dir"; then
+        echo ""
+        echo -e "  ${YELLOW}Add this to your ~/.zshrc (before compinit):${NC}"
+        echo ""
+        echo "    fpath=(~/.zsh/completions \$fpath)"
+        echo "    autoload -Uz compinit && compinit"
+        echo ""
+    fi
+elif [[ "$current_shell" == "bash" ]]; then
+    # Install bash completion
+    bash_comp_dir="${HOME}/.local/share/bash-completion/completions"
+    mkdir -p "$bash_comp_dir"
+    cp "$SCRIPT_DIR/workspace.completion.bash" "$bash_comp_dir/workspace"
+    echo -e "  Installed bash completion to $bash_comp_dir/workspace"
+fi
+
 # Create config if it doesn't exist
 if [[ ! -f "$HOME/.workspaces.yml" ]]; then
     echo -e "${YELLOW}Creating config file...${NC}"
