@@ -633,11 +633,96 @@ cmd_resume() {
     workspace_dir=$(resolve_worktree_path "$project" "$feature")
     local tmux_session="${project}-${feature}"
 
+    # If no worktree exists, check if the branch exists and create worktree from it
     if [[ -z "$workspace_dir" ]]; then
-        echo -e "${RED}Error: No worktree found for '$feature'${NC}"
+        # Check if the branch exists locally
+        if ! git -C "$PROJECT_PATH" rev-parse --verify "$feature" &>/dev/null; then
+            echo -e "${RED}Error: No worktree or branch found for '$feature'${NC}"
+            echo ""
+            echo "Use 'workspace new' or 'workspace pull' to create a workspace first."
+            exit 1
+        fi
+
+        workspace_dir="$WORKTREE_DIR/$(sanitize_dir_name "$feature")"
+
+        echo -e "${GREEN}Creating workspace from existing branch: $feature${NC}"
+
+        # Generate ports and settings
+        local random_port=$((3100 + RANDOM % 800))
+        local rails_port=$((random_port + 2))
+        local server_url="http://localhost:$rails_port"
+        local session_cookie="${project}_cookie_${rails_port}"
+        local redis_db
+        redis_db=$(next_free_redis_db)
+
+        echo -e "  Project:             $project"
+        echo -e "  Workspace directory: $workspace_dir"
+        echo -e "  Vite port:           $random_port"
+        echo -e "  Rails port:          $rails_port"
+        echo -e "  Session cookie:      $session_cookie"
+        echo -e "  Redis DB:            $redis_db"
         echo ""
-        echo "Use 'workspace new' or 'workspace pull' to create a workspace first."
-        exit 1
+
+        # Create worktree from existing branch
+        echo -e "${YELLOW}Creating git worktree...${NC}"
+        git -C "$PROJECT_PATH" worktree add "$workspace_dir" "$feature"
+
+        # Copy .env file if it exists in main workspace
+        if [[ -f "$PROJECT_PATH/.env" ]]; then
+            echo -e "${YELLOW}Copying .env file...${NC}"
+            cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
+        fi
+
+        # Update .env file with workspace-specific settings
+        echo -e "${YELLOW}Configuring .env...${NC}"
+        if [[ -f "$workspace_dir/.env" ]]; then
+            grep -v '^SESSION_COOKIE_NAME=' "$workspace_dir/.env" | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
+            mv "$workspace_dir/.env.tmp" "$workspace_dir/.env"
+        fi
+
+        cat >> "$workspace_dir/.env" << EOF
+
+# Workspace-specific settings (port: $random_port)
+SESSION_COOKIE_NAME="$session_cookie"
+VITE_RUBY_PORT=$random_port
+REDIS_URL=redis://localhost:6379/$redis_db
+EOF
+
+        # Create .env.test
+        cat > "$workspace_dir/.env.test" << EOF
+VITE_RUBY_PORT=3037
+EOF
+
+        # Create Procfile.workspace
+        echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
+        local template_file="$PROJECT_PATH/Procfile.workspace.template"
+        if [[ -f "$template_file" ]]; then
+            sed -e "s/\$RAILS_PORT/$rails_port/g" \
+                -e "s/\$VITE_PORT/$random_port/g" \
+                "$template_file" > "$workspace_dir/Procfile.workspace"
+        else
+            cat > "$workspace_dir/Procfile.workspace" << EOF
+web: RUBY_DEBUG_OPEN=true bin/rails server -p $rails_port
+vite: VITE_RUBY_PORT=$random_port bin/vite dev
+worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
+EOF
+        fi
+
+        # Create docs directory and feature notes file
+        mkdir -p "$workspace_dir/docs"
+        if [[ ! -f "$workspace_dir/docs/$feature.md" ]]; then
+            cat > "$workspace_dir/docs/$feature.md" << EOF
+# $feature
+
+---
+Server URL:  $server_url
+Git branch:  $feature
+Path:        $workspace_dir
+---
+EOF
+        fi
+
+        # Fall through to tmux session creation below
     fi
 
     # Check if workspace exists on disk
@@ -658,15 +743,17 @@ cmd_resume() {
         exit 0
     fi
 
-    # Read port from existing .env if available
-    local rails_port=""
-    local server_url=""
-    if [[ -f "$workspace_dir/.env" ]]; then
-        local vite_port
-        vite_port=$(grep '^VITE_RUBY_PORT=' "$workspace_dir/.env" | cut -d= -f2 | tr -d '"' || true)
-        if [[ -n "$vite_port" ]]; then
-            rails_port=$((vite_port + 2))
-            server_url="http://localhost:$rails_port"
+    # Read port from existing .env if available (may already be set from branch-creation path)
+    if [[ -z "${server_url:-}" ]]; then
+        local rails_port=""
+        local server_url=""
+        if [[ -f "$workspace_dir/.env" ]]; then
+            local vite_port
+            vite_port=$(grep '^VITE_RUBY_PORT=' "$workspace_dir/.env" | cut -d= -f2 | tr -d '"' || true)
+            if [[ -n "$vite_port" ]]; then
+                rails_port=$((vite_port + 2))
+                server_url="http://localhost:$rails_port"
+            fi
         fi
     fi
 
@@ -857,6 +944,10 @@ cmd_delete() {
         exit 1
     fi
 
+    # Capture the actual branch name from the worktree before we remove it
+    local worktree_branch
+    worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
+
     # Prevent deleting the main directory
     if [[ "$workspace_dir" == "$PROJECT_PATH" ]]; then
         echo -e "${RED}Error: Cannot delete the main workspace${NC}"
@@ -903,22 +994,24 @@ cmd_delete() {
     consolidate_claude_sessions "$workspace_dir" "$PROJECT_PATH"
 
     # Ask about deleting the branch
-    local branch_exists
-    branch_exists=$(git branch --list "$feature")
-    if [[ -n "$branch_exists" ]]; then
-        local delete_branch
-        if [[ "$force" == true ]]; then
-            delete_branch="y"
-        else
-            read -p "Delete branch '$feature'? [y/N] " -n 1 -r delete_branch
-            echo
-        fi
+    if [[ -n "$worktree_branch" ]]; then
+        local branch_exists
+        branch_exists=$(git branch --list "$worktree_branch")
+        if [[ -n "$branch_exists" ]]; then
+            local delete_branch
+            if [[ "$force" == true ]]; then
+                delete_branch="y"
+            else
+                read -p "Delete branch '$worktree_branch'? [y/N] " -n 1 -r delete_branch
+                echo
+            fi
 
-        if [[ $delete_branch =~ ^[Yy]$ ]]; then
-            echo -e "${YELLOW}Deleting branch: $feature${NC}"
-            git branch -D "$feature"
-        else
-            echo -e "Branch '$feature' kept. Delete it later with: git branch -D $feature"
+            if [[ $delete_branch =~ ^[Yy]$ ]]; then
+                echo -e "${YELLOW}Deleting branch: $worktree_branch${NC}"
+                git branch -D "$worktree_branch"
+            else
+                echo -e "Branch '$worktree_branch' kept. Delete it later with: git branch -D $worktree_branch"
+            fi
         fi
     fi
 
@@ -1017,6 +1110,46 @@ cmd_list() {
     fi
 }
 
+cmd_redis() {
+    local projects
+    projects=$(list_projects)
+
+    local found_any=false
+
+    for project in $projects; do
+        get_project_paths "$project"
+
+        local worktrees
+        worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
+        [[ -z "$worktrees" ]] && continue
+
+        # Skip the main project path
+        local workspace_worktrees
+        workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
+        [[ -z "$workspace_worktrees" ]] && continue
+
+        while IFS= read -r line; do
+            local path
+            path=$(echo "$line" | awk '{print $1}')
+            [[ -f "$path/.env" ]] || continue
+
+            local db
+            db=$(grep '^REDIS_URL=' "$path/.env" | sed 's|.*redis://[^/]*/||' | tr -d '"' || true)
+            [[ -z "$db" ]] && continue
+
+            local feature
+            feature=$(basename "$path")
+            found_any=true
+
+            echo -e "${CYAN}$project${NC} $feature ${MAGENTA}redis:$db${NC}"
+        done <<< "$workspace_worktrees"
+    done
+
+    if [[ "$found_any" == false ]]; then
+        echo "No workspaces with Redis DBs found."
+    fi
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -1027,9 +1160,10 @@ usage() {
     echo "Commands:"
     echo "  new <project> <feature>      Create a new workspace (new branch off master)"
     echo "  pull <project> <branch>      Pull a remote branch into a new workspace"
-    echo "  resume <project> <feature>   Resume an existing workspace"
+    echo "  resume <project> <feature>   Resume an existing workspace (creates worktree from branch if needed)"
     echo "  delete <project> <feature>   Delete a workspace"
     echo "  list [project]               List all workspaces"
+    echo "  redis                        Show Redis DB allocations"
     echo ""
     echo "Examples:"
     echo "  workspace new tract my-feature"
@@ -1066,6 +1200,10 @@ main() {
         list)
             check_config
             cmd_list "$@"
+            ;;
+        redis)
+            check_config
+            cmd_redis
             ;;
         -h|--help|"")
             usage
