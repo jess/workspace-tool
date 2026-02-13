@@ -631,7 +631,6 @@ cmd_resume() {
 
     local workspace_dir
     workspace_dir=$(resolve_worktree_path "$project" "$feature")
-    local tmux_session="${project}-${feature}"
 
     # If no worktree exists, check if the branch exists and create worktree from it
     if [[ -z "$workspace_dir" ]]; then
@@ -730,6 +729,11 @@ EOF
         echo -e "${RED}Error: Workspace directory does not exist: $workspace_dir${NC}"
         exit 1
     fi
+
+    # Derive tmux session name from the actual branch in the worktree
+    local worktree_branch
+    worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
+    local tmux_session="${project}-${worktree_branch:-$feature}"
 
     # Check if tmux session already exists
     if tmux has-session -t "$tmux_session" 2>/dev/null; then
@@ -934,8 +938,6 @@ cmd_delete() {
 
     local workspace_dir
     workspace_dir=$(resolve_worktree_path "$project" "$feature")
-    local tmux_session="${project}-${feature}"
-
     if [[ -z "$workspace_dir" ]]; then
         echo -e "${RED}Error: No worktree found for '$feature'${NC}"
         echo ""
@@ -947,6 +949,7 @@ cmd_delete() {
     # Capture the actual branch name from the worktree before we remove it
     local worktree_branch
     worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
+    local tmux_session="${project}-${worktree_branch}"
 
     # Prevent deleting the main directory
     if [[ "$workspace_dir" == "$PROJECT_PATH" ]]; then
@@ -1068,7 +1071,7 @@ cmd_list() {
                 feature=$(basename "$path")
 
                 # Check if tmux session exists
-                local tmux_session="${project}-${feature}"
+                local tmux_session="${project}-${branch}"
                 local tmux_status=""
                 if tmux has-session -t "$tmux_session" 2>/dev/null; then
                     tmux_status="${GREEN}[running]${NC}"

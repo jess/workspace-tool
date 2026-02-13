@@ -8,6 +8,7 @@ _workspace() {
         'resume:Resume an existing workspace'
         'delete:Delete a workspace'
         'list:List all workspaces'
+        'redis:Show Redis DB allocations'
     )
 
     _arguments -C \
