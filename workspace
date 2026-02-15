@@ -140,6 +140,43 @@ next_free_redis_db() {
     echo "1"
 }
 
+# Find an unused port by scanning ALL projects' worktrees for VITE_RUBY_PORT
+next_free_port() {
+    local used_ports=""
+
+    for project in $(list_projects); do
+        local proj_path
+        proj_path=$(expand_path "$(get_project_config "$project" "path")")
+        [[ -d "$proj_path" ]] || continue
+
+        while IFS= read -r line; do
+            local wt_path
+            wt_path=$(echo "$line" | awk '{print $1}')
+            if [[ -f "$wt_path/.env" ]]; then
+                local port
+                port=$(grep '^VITE_RUBY_PORT=' "$wt_path/.env" | cut -d= -f2 | tr -d '"' || true)
+                if [[ -n "$port" ]]; then
+                    used_ports="$used_ports $port $((port + 2))"
+                fi
+            fi
+        done <<< "$(git -C "$proj_path" worktree list 2>/dev/null)"
+    done
+
+    local attempts=0
+    while (( attempts < 50 )); do
+        local candidate=$((3100 + RANDOM % 800))
+        if ! echo "$used_ports" | grep -qw "$candidate" && \
+           ! echo "$used_ports" | grep -qw "$((candidate + 2))"; then
+            echo "$candidate"
+            return
+        fi
+        ((attempts++))
+    done
+
+    echo -e "${RED}Warning: Could not find an unused port after 50 attempts${NC}" >&2
+    echo "$((3100 + RANDOM % 800))"
+}
+
 # Resolve the actual worktree path for a feature.
 # If the config-derived path isn't a worktree, search git worktree list by branch name.
 resolve_worktree_path() {
@@ -192,8 +229,8 @@ cmd_new() {
         exit 1
     fi
 
-    # Generate a random port between 3100-3900 (avoiding common ports)
-    local random_port=$((3100 + RANDOM % 800))
+    local random_port
+    random_port=$(next_free_port)
     local rails_port=$((random_port + 2))
     local server_url="http://localhost:$rails_port"
     local session_cookie="${project}_cookie_${rails_port}"
@@ -397,8 +434,8 @@ cmd_pull() {
         exit 1
     fi
 
-    # Generate a random port between 3100-3900 (avoiding common ports)
-    local random_port=$((3100 + RANDOM % 800))
+    local random_port
+    random_port=$(next_free_port)
     local rails_port=$((random_port + 2))
     local server_url="http://localhost:$rails_port"
     local session_cookie="${project}_cookie_${rails_port}"
@@ -647,7 +684,8 @@ cmd_resume() {
         echo -e "${GREEN}Creating workspace from existing branch: $feature${NC}"
 
         # Generate ports and settings
-        local random_port=$((3100 + RANDOM % 800))
+        local random_port
+        random_port=$(next_free_port)
         local rails_port=$((random_port + 2))
         local server_url="http://localhost:$rails_port"
         local session_cookie="${project}_cookie_${rails_port}"
