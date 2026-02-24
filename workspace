@@ -1099,7 +1099,7 @@ cmd_list() {
         projects=$(list_projects)
     fi
 
-    local found_any=false
+    local rows=""
 
     for project in $projects; do
         get_project_paths "$project"
@@ -1116,67 +1116,85 @@ cmd_list() {
         local workspace_worktrees
         workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
 
-        if [[ -n "$workspace_worktrees" ]]; then
-            found_any=true
-            echo -e "${CYAN}$project${NC}"
+        [[ -z "$workspace_worktrees" ]] && continue
 
-            while IFS= read -r line; do
-                local path branch
-                path=$(echo "$line" | awk '{print $1}')
-                branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
-
-                # Extract feature name from path
-                local feature
-                feature=$(basename "$path")
-
-                # Check if tmux session exists
-                local tmux_session="${project}-${branch}"
-                local tmux_status=""
-                if tmux has-session -t "$tmux_session" 2>/dev/null; then
-                    tmux_status="${GREEN}[running]${NC}"
-                fi
-
-                # Check PR status via GitHub CLI
-                local pr_status=""
-                if command -v gh &>/dev/null; then
-                    local origin_url
-                    origin_url=$(git -C "$PROJECT_PATH" remote get-url origin)
-                    local pr_state pr_url
-                    pr_state=$(gh pr view "$branch" --repo "$origin_url" --json state --jq '.state' 2>/dev/null || true)
-                    pr_url=$(gh pr view "$branch" --repo "$origin_url" --json url --jq '.url' 2>/dev/null || true)
-                    case "$pr_state" in
-                        OPEN)   pr_status="${YELLOW}[open]${NC}" ;;
-                        MERGED) pr_status="${BLUE}[merged]${NC}" ;;
-                        CLOSED) pr_status="${RED}[closed]${NC}" ;;
-                    esac
-
-                    # Add PR URL to docs file if missing
-                    local docs_file="$path/docs/${feature}.md"
-                    if [[ -n "$pr_url" && -f "$docs_file" ]] && ! grep -q "^PR:" "$docs_file"; then
-                        sed -i '' "/^Path:/s|$|\nPR:          $pr_url|" "$docs_file"
-                    fi
-                fi
-
-                echo -e "  $feature ($branch) $tmux_status ${pr_status}\n    $path"
-            done <<< "$workspace_worktrees"
-            echo ""
+        local origin_url=""
+        if command -v gh &>/dev/null; then
+            origin_url=$(git -C "$PROJECT_PATH" remote get-url origin 2>/dev/null || true)
         fi
+
+        while IFS= read -r line; do
+            local path branch
+            path=$(echo "$line" | awk '{print $1}')
+            branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+
+            # Extract feature name from path
+            local feature
+            feature=$(basename "$path")
+
+            # Check if tmux session exists
+            local tmux_session="${project}-${branch}"
+            local tmux_status=""
+            if tmux has-session -t "$tmux_session" 2>/dev/null; then
+                tmux_status="running"
+            fi
+
+            # Check PR status via GitHub CLI
+            local pr_status=""
+            if [[ -n "$origin_url" ]]; then
+                local pr_state pr_url
+                pr_state=$(gh pr view "$branch" --repo "$origin_url" --json state --jq '.state' 2>/dev/null || true)
+                pr_url=$(gh pr view "$branch" --repo "$origin_url" --json url --jq '.url' 2>/dev/null || true)
+                case "$pr_state" in
+                    OPEN)   pr_status="open" ;;
+                    MERGED) pr_status="merged" ;;
+                    CLOSED) pr_status="closed" ;;
+                esac
+
+                # Add PR URL to docs file if missing
+                local docs_file="$path/docs/${feature}.md"
+                if [[ -n "$pr_url" && -f "$docs_file" ]] && ! grep -q "^PR:" "$docs_file"; then
+                    sed -i '' "/^Path:/s|$|\nPR:          $pr_url|" "$docs_file"
+                fi
+            fi
+
+            # Pad tmux/pr values so column alignment uses consistent width
+            local tmux_display="${tmux_status:-~}"
+            local pr_display="${pr_status:-~}"
+            rows+="$project,$feature,$branch,$tmux_display,$pr_display"$'\n'
+        done <<< "$workspace_worktrees"
     done
 
-    if [[ "$found_any" == false ]]; then
+    if [[ -z "$rows" ]]; then
         if [[ -n "$filter_project" ]]; then
             echo "No workspaces found for project: $filter_project"
         else
             echo "No workspaces found."
         fi
+        return
     fi
+
+    local table header_line separator max_width
+    table=$(printf "Project,Workspace,Branch,Tmux,PR\n%s" "$rows" | column -t -s,)
+    header_line=$(echo "$table" | head -1)
+    max_width=$(echo "$table" | awk '{ if (length > max) max = length } END { print max }')
+    separator=$(printf '%*s' "$max_width" '' | tr ' ' '-')
+
+    # Replace placeholders and render table
+    local body
+    body=$(echo "$table" | tail -n +2 | sed 's/~/ /g')
+    table=$(printf "%s\n%s\n%s" "$header_line" "$separator" "$body")
+    echo "$table" | gum style \
+        --border rounded \
+        --border-foreground "#7D56F4" \
+        --padding "0 1"
 }
 
-cmd_redis() {
+cmd_ports() {
     local projects
     projects=$(list_projects)
 
-    local found_any=false
+    local rows=""
 
     for project in $projects; do
         get_project_paths "$project"
@@ -1195,21 +1213,39 @@ cmd_redis() {
             path=$(echo "$line" | awk '{print $1}')
             [[ -f "$path/.env" ]] || continue
 
-            local db
+            local vite_port rails_port db
+            vite_port=$(grep '^VITE_RUBY_PORT=' "$path/.env" | cut -d= -f2 | tr -d '"' || true)
             db=$(grep '^REDIS_URL=' "$path/.env" | sed 's|.*redis://[^/]*/||' | tr -d '"' || true)
-            [[ -z "$db" ]] && continue
+
+            [[ -z "$vite_port" && -z "$db" ]] && continue
+
+            rails_port=""
+            if [[ -n "$vite_port" ]]; then
+                rails_port=$((vite_port + 2))
+            fi
 
             local feature
             feature=$(basename "$path")
-            found_any=true
 
-            echo -e "${CYAN}$project${NC} $feature ${MAGENTA}redis:$db${NC}"
+            rows+="$project,$feature,$rails_port,$vite_port,$db"$'\n'
         done <<< "$workspace_worktrees"
     done
 
-    if [[ "$found_any" == false ]]; then
-        echo "No workspaces with Redis DBs found."
+    if [[ -z "$rows" ]]; then
+        echo "No workspaces found."
+        return
     fi
+
+    local table header_line separator max_width
+    table=$(printf "Project,Workspace,Rails,Vite,Redis\n%s" "$rows" | column -t -s,)
+    header_line=$(echo "$table" | head -1)
+    max_width=$(echo "$table" | awk '{ if (length > max) max = length } END { print max }')
+    separator=$(printf '%*s' "$max_width" '' | tr ' ' '-')
+    table=$(printf "%s\n%s\n%s" "$header_line" "$separator" "$(echo "$table" | tail -n +2)")
+    echo "$table" | gum style \
+        --border rounded \
+        --border-foreground "#7D56F4" \
+        --padding "0 1"
 }
 
 # ============================================================================
@@ -1225,7 +1261,7 @@ usage() {
     echo "  resume <project> <feature>   Resume an existing workspace (creates worktree from branch if needed)"
     echo "  delete <project> <feature>   Delete a workspace"
     echo "  list [project]               List all workspaces"
-    echo "  redis                        Show Redis DB allocations"
+    echo "  ports                        Show all port and Redis allocations"
     echo ""
     echo "Examples:"
     echo "  workspace new tract my-feature"
@@ -1263,9 +1299,9 @@ main() {
             check_config
             cmd_list "$@"
             ;;
-        redis)
+        ports|redis)
             check_config
-            cmd_redis
+            cmd_ports
             ;;
         -h|--help|"")
             usage
