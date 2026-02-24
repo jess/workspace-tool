@@ -260,6 +260,13 @@ cmd_new() {
         cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
     fi
 
+    # Copy Claude Code settings so permissions carry over
+    if [[ -f "$PROJECT_PATH/.claude/settings.local.json" ]]; then
+        echo -e "${YELLOW}Copying Claude Code settings...${NC}"
+        mkdir -p "$workspace_dir/.claude"
+        cp "$PROJECT_PATH/.claude/settings.local.json" "$workspace_dir/.claude/settings.local.json"
+    fi
+
     # Update .env file with workspace-specific settings
     echo -e "${YELLOW}Configuring .env...${NC}"
 
@@ -464,6 +471,13 @@ cmd_pull() {
     if [[ -f "$PROJECT_PATH/.env" ]]; then
         echo -e "${YELLOW}Copying .env file...${NC}"
         cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
+    fi
+
+    # Copy Claude Code settings so permissions carry over
+    if [[ -f "$PROJECT_PATH/.claude/settings.local.json" ]]; then
+        echo -e "${YELLOW}Copying Claude Code settings...${NC}"
+        mkdir -p "$workspace_dir/.claude"
+        cp "$PROJECT_PATH/.claude/settings.local.json" "$workspace_dir/.claude/settings.local.json"
     fi
 
     # Update .env file with workspace-specific settings
@@ -708,6 +722,13 @@ cmd_resume() {
         if [[ -f "$PROJECT_PATH/.env" ]]; then
             echo -e "${YELLOW}Copying .env file...${NC}"
             cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
+        fi
+
+        # Copy Claude Code settings so permissions carry over
+        if [[ -f "$PROJECT_PATH/.claude/settings.local.json" ]]; then
+            echo -e "${YELLOW}Copying Claude Code settings...${NC}"
+            mkdir -p "$workspace_dir/.claude"
+            cp "$PROJECT_PATH/.claude/settings.local.json" "$workspace_dir/.claude/settings.local.json"
         fi
 
         # Update .env file with workspace-specific settings
