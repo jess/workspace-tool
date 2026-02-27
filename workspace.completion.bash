@@ -2,7 +2,7 @@ _workspace_completions() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="new pull resume delete list redis"
+    local commands="new pull resume resume-all delete list redis"
     local config_file="$HOME/.workspaces.yml"
 
     # Complete subcommand

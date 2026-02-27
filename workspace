@@ -1249,6 +1249,81 @@ cmd_ports() {
 }
 
 # ============================================================================
+# Resume all workspaces
+# ============================================================================
+
+cmd_resume_all() {
+    local projects
+    projects=$(list_projects)
+
+    local to_resume=()
+    local already_running=()
+
+    for project in $projects; do
+        get_project_paths "$project"
+
+        local worktrees
+        worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
+        [[ -z "$worktrees" ]] && continue
+
+        local workspace_worktrees
+        workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
+        [[ -z "$workspace_worktrees" ]] && continue
+
+        while IFS= read -r line; do
+            local path branch
+            path=$(echo "$line" | awk '{print $1}')
+            branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+
+            local feature
+            feature=$(basename "$path")
+
+            local tmux_session="${project}-${branch}"
+            if tmux has-session -t "$tmux_session" 2>/dev/null; then
+                already_running+=("$project/$feature")
+            else
+                to_resume+=("$project $feature")
+            fi
+        done <<< "$workspace_worktrees"
+    done
+
+    if [[ ${#to_resume[@]} -eq 0 && ${#already_running[@]} -eq 0 ]]; then
+        echo "No workspaces found."
+        return
+    fi
+
+    if [[ ${#already_running[@]} -gt 0 ]]; then
+        echo -e "${BLUE}Already running:${NC}"
+        for item in "${already_running[@]}"; do
+            echo -e "  $item"
+        done
+        echo ""
+    fi
+
+    if [[ ${#to_resume[@]} -eq 0 ]]; then
+        echo "All workspaces are already running."
+        return
+    fi
+
+    echo -e "${GREEN}Resuming ${#to_resume[@]} workspace(s)...${NC}"
+    echo ""
+
+    local resumed=0
+    for item in "${to_resume[@]}"; do
+        local project feature
+        project=$(echo "$item" | awk '{print $1}')
+        feature=$(echo "$item" | awk '{print $2}')
+
+        echo -e "${CYAN}━━━ $project / $feature ━━━${NC}"
+        cmd_resume "$project" "$feature"
+        resumed=$((resumed + 1))
+        echo ""
+    done
+
+    echo -e "${GREEN}Done! Resumed $resumed workspace(s).${NC}"
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -1259,6 +1334,7 @@ usage() {
     echo "  new <project> <feature>      Create a new workspace (new branch off master)"
     echo "  pull <project> <branch>      Pull a remote branch into a new workspace"
     echo "  resume <project> <feature>   Resume an existing workspace (creates worktree from branch if needed)"
+    echo "  resume-all                   Resume all workspaces (useful after reboot)"
     echo "  delete <project> <feature>   Delete a workspace"
     echo "  list [project]               List all workspaces"
     echo "  ports                        Show all port and Redis allocations"
@@ -1290,6 +1366,10 @@ main() {
         resume)
             check_config
             cmd_resume "$@"
+            ;;
+        resume-all)
+            check_config
+            cmd_resume_all
             ;;
         delete)
             check_config

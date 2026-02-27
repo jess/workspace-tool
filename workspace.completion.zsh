@@ -6,6 +6,7 @@ _workspace() {
         'new:Create a new workspace (new branch off master)'
         'pull:Pull a remote branch into a new workspace'
         'resume:Resume an existing workspace'
+        'resume-all:Resume all workspaces (useful after reboot)'
         'delete:Delete a workspace'
         'list:List all workspaces'
         'redis:Show Redis DB allocations'
