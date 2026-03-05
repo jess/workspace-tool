@@ -668,17 +668,79 @@ EOF
 
 cmd_resume() {
     local project="$1"
-    local feature="$2"
+    local feature="${2:-}"
 
-    if [[ -z "$project" ]] || [[ -z "$feature" ]]; then
-        echo "Usage: workspace resume <project> <feature>"
+    if [[ -z "$project" ]]; then
+        echo "Usage: workspace resume <project> [feature]"
         echo ""
-        echo "Example: workspace resume tract my-feature"
+        echo "Examples:"
+        echo "  workspace resume tract my-feature   # resume one workspace"
+        echo "  workspace resume tract              # resume all tract workspaces"
         exit 1
     fi
 
     validate_project "$project"
     get_project_paths "$project"
+
+    # Project-level resume: resume all stopped workspaces for this project
+    if [[ -z "$feature" ]]; then
+        local worktrees
+        worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
+        [[ -z "$worktrees" ]] && { echo "No worktrees found for $project."; return; }
+
+        local workspace_worktrees
+        workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
+        [[ -z "$workspace_worktrees" ]] && { echo "No workspaces found for $project."; return; }
+
+        local to_resume=()
+        local already_running=()
+
+        while IFS= read -r line; do
+            local path branch wt_feature
+            path=$(echo "$line" | awk '{print $1}')
+            branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+            wt_feature=$(basename "$path")
+
+            local tmux_session="${project}-${branch}"
+            if tmux has-session -t "$tmux_session" 2>/dev/null; then
+                already_running+=("$wt_feature")
+            else
+                to_resume+=("$wt_feature")
+            fi
+        done <<< "$workspace_worktrees"
+
+        if [[ ${#to_resume[@]} -eq 0 && ${#already_running[@]} -eq 0 ]]; then
+            echo "No workspaces found for $project."
+            return
+        fi
+
+        if [[ ${#already_running[@]} -gt 0 ]]; then
+            echo -e "${BLUE}Already running:${NC}"
+            for item in "${already_running[@]}"; do
+                echo -e "  $item"
+            done
+            echo ""
+        fi
+
+        if [[ ${#to_resume[@]} -eq 0 ]]; then
+            echo "All $project workspaces are already running."
+            return
+        fi
+
+        echo -e "${GREEN}Resuming ${#to_resume[@]} $project workspace(s)...${NC}"
+        echo ""
+
+        local resumed=0
+        for wt_feature in "${to_resume[@]}"; do
+            echo -e "${CYAN}━━━ $project / $wt_feature ━━━${NC}"
+            cmd_resume "$project" "$wt_feature"
+            resumed=$((resumed + 1))
+            echo ""
+        done
+
+        echo -e "${GREEN}Done! Resumed $resumed workspace(s).${NC}"
+        return
+    fi
 
     local workspace_dir
     workspace_dir=$(resolve_worktree_path "$project" "$feature")
@@ -928,6 +990,92 @@ EOF
     echo ""
     echo -e "Or if not in tmux:"
     echo -e "  ${YELLOW}tmux attach -t $tmux_session${NC}"
+}
+
+# ============================================================================
+# Subcommand: stop
+# ============================================================================
+
+stop_one_workspace() {
+    local project="$1"
+    local workspace_dir="$2"
+    local worktree_branch="$3"
+
+    local tmux_session="${project}-${worktree_branch}"
+    local stopped=false
+
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+        echo -e "${YELLOW}Killing tmux session: $tmux_session${NC}"
+        tmux kill-session -t "$tmux_session"
+        stopped=true
+    fi
+
+    if [[ -f "$workspace_dir/.overmind.sock" ]]; then
+        echo -e "${YELLOW}Stopping overmind in $workspace_dir...${NC}"
+        (cd "$workspace_dir" && overmind quit 2>/dev/null) || true
+        stopped=true
+    fi
+
+    if [[ "$stopped" == false ]]; then
+        echo -e "  ${BLUE}$worktree_branch${NC} — already stopped"
+    else
+        echo -e "  ${GREEN}$worktree_branch${NC} — stopped"
+    fi
+}
+
+cmd_stop() {
+    local project="$1"
+    local feature="${2:-}"
+
+    if [[ -z "$project" ]]; then
+        echo "Usage: workspace stop <project> [feature]"
+        echo ""
+        echo "Examples:"
+        echo "  workspace stop tract my-feature   # stop one workspace"
+        echo "  workspace stop tract              # stop all tract workspaces"
+        exit 1
+    fi
+
+    validate_project "$project"
+    get_project_paths "$project"
+
+    if [[ -n "$feature" ]]; then
+        # Stop a single workspace
+        local workspace_dir
+        workspace_dir=$(resolve_worktree_path "$project" "$feature")
+        if [[ -z "$workspace_dir" ]]; then
+            echo -e "${RED}Error: No worktree found for '$feature'${NC}"
+            exit 1
+        fi
+
+        local worktree_branch
+        worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
+
+        stop_one_workspace "$project" "$workspace_dir" "$worktree_branch"
+    else
+        # Stop all workspaces for this project
+        local worktrees
+        worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
+        [[ -z "$worktrees" ]] && { echo "No worktrees found for $project."; return; }
+
+        local workspace_worktrees
+        workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
+        [[ -z "$workspace_worktrees" ]] && { echo "No workspaces found for $project."; return; }
+
+        echo -e "${GREEN}Stopping all $project workspaces...${NC}"
+        echo ""
+
+        while IFS= read -r line; do
+            local path branch
+            path=$(echo "$line" | awk '{print $1}')
+            branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+
+            stop_one_workspace "$project" "$path" "$branch"
+        done <<< "$workspace_worktrees"
+    fi
+
+    echo ""
+    echo -e "${GREEN}Done.${NC}"
 }
 
 # ============================================================================
@@ -1333,8 +1481,9 @@ usage() {
     echo "Commands:"
     echo "  new <project> <feature>      Create a new workspace (new branch off master)"
     echo "  pull <project> <branch>      Pull a remote branch into a new workspace"
-    echo "  resume <project> <feature>   Resume an existing workspace (creates worktree from branch if needed)"
+    echo "  resume <project> [feature]   Resume workspace(s) (all for project if no feature given)"
     echo "  resume-all                   Resume all workspaces (useful after reboot)"
+    echo "  stop <project> [feature]     Stop workspace(s) without deleting (all for project if no feature given)"
     echo "  delete <project> <feature>   Delete a workspace"
     echo "  list [project]               List all workspaces"
     echo "  ports                        Show all port and Redis allocations"
@@ -1343,6 +1492,9 @@ usage() {
     echo "  workspace new tract my-feature"
     echo "  workspace pull tract remote-branch"
     echo "  workspace resume tract my-feature"
+    echo "  workspace resume tract"
+    echo "  workspace stop tract my-feature"
+    echo "  workspace stop tract"
     echo "  workspace delete tract my-feature"
     echo "  workspace list"
     echo "  workspace list tract"
@@ -1370,6 +1522,10 @@ main() {
         resume-all)
             check_config
             cmd_resume_all
+            ;;
+        stop)
+            check_config
+            cmd_stop "$@"
             ;;
         delete)
             check_config

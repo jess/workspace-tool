@@ -5,11 +5,12 @@ _workspace() {
     local commands=(
         'new:Create a new workspace (new branch off master)'
         'pull:Pull a remote branch into a new workspace'
-        'resume:Resume an existing workspace'
+        'resume:Resume workspace(s)'
         'resume-all:Resume all workspaces (useful after reboot)'
+        'stop:Stop workspace(s) without deleting'
         'delete:Delete a workspace'
         'list:List all workspaces'
-        'redis:Show Redis DB allocations'
+        'ports:Show all port and Redis allocations'
     )
 
     _arguments -C \
@@ -29,7 +30,7 @@ _workspace() {
             ;;
         feature)
             local command="${words[2]}"
-            if [[ "$command" == "resume" || "$command" == "delete" ]]; then
+            if [[ "$command" == "resume" || "$command" == "stop" || "$command" == "delete" ]]; then
                 local project="${words[3]}"
                 local project_path
 

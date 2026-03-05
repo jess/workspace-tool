@@ -2,7 +2,7 @@ _workspace_completions() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="new pull resume resume-all delete list redis"
+    local commands="new pull resume resume-all stop delete list ports"
     local config_file="$HOME/.workspaces.yml"
 
     # Complete subcommand
@@ -22,7 +22,7 @@ _workspace_completions() {
     fi
 
     # Complete feature/branch name for resume and delete
-    if [[ $cword -eq 3 ]] && [[ "$command" == "resume" || "$command" == "delete" ]]; then
+    if [[ $cword -eq 3 ]] && [[ "$command" == "resume" || "$command" == "stop" || "$command" == "delete" ]]; then
         local project="${words[2]}"
         local project_path worktree_dir
 
