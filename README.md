@@ -1,6 +1,10 @@
 # workspace
 
-A tool for managing multiple git worktree-based development workspaces across Rails projects.
+IDEs are for people who like clicking things. The kool kids use vim in tmux with [Claude Code](https://docs.anthropic.com/en/docs/claude-code) running in a split pane — no GUI, no Electron, no waiting for VS Code to "index your project."
+
+This tool manages the boring parts: spin up isolated git worktrees with their own ports, Redis DBs, and overmind processes so you can juggle multiple features without anything stepping on anything else. One command to create a workspace, one to tear it down, and Claude Code sessions get consolidated back to the main project when you're done.
+
+Opinionated? Absolutely. It assumes you're running Rails, tmux, overmind, and vim. If that's not your stack, this isn't your tool.
 
 ## Features
 
