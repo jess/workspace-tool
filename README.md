@@ -86,13 +86,21 @@ Edit `~/.workspaces.yml` to add your projects:
 ```yaml
 projects:
   myapp:
-    path: ~/projects/myapp/web          # Main checkout (source of .env)
-    worktree_dir: ~/projects/myapp      # Where worktrees are created
+    path: ~/projects/myapp/main          # Main checkout (source of .env)
+    worktree_dir: ~/projects/myapp/workspaces      # Where worktrees are created
 ```
 
-### Custom Procfile
+### Custom Procfile (optional)
 
-Create `Procfile.workspace.template` in your project's main path. The template is copied as-is into each workspace, so it should reference environment variables from `.env`:
+By default, each workspace gets a `Procfile.workspace` with:
+
+```
+web: RUBY_DEBUG_OPEN=true bin/rails server -p $RAILS_PORT
+vite: bin/vite dev
+worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
+```
+
+To customize this, create `Procfile.workspace.template` in your project's main path. The template is copied as-is into each workspace, so it should reference environment variables from `.env`:
 
 ```
 web: RUBY_DEBUG_OPEN=true bin/rails server -p $RAILS_PORT
@@ -101,8 +109,6 @@ worker: bundle exec sidekiq -q default -q mailers
 ```
 
 Overmind automatically loads `.env` before starting processes, so all workspace-specific variables are available.
-
-If no template exists, a default Rails/Sidekiq Procfile is used.
 
 ## Usage
 
@@ -121,7 +127,7 @@ workspace new myapp my-feature
 ```
 
 This will:
-1. Fetch latest from `origin/master`
+1. Fetch latest from the default branch (`main` or `master`, auto-detected)
 2. Create a git worktree at `~/projects/myapp/my-feature` with a new branch
 3. Copy `.env` from the main project and add workspace-specific settings (ports, session cookie, Redis DB)
 4. Create a tmux session `myapp-my-feature` with:
@@ -166,11 +172,21 @@ workspace delete myapp my-feature --force  # Skip confirmations
 This will:
 1. Stop overmind
 2. Kill the tmux session
-3. Remove the git worktree
+3. Confirm, then remove the git worktree
 4. Move any Claude Code sessions to the main project (so they appear in `claude resume`)
-5. Optionally delete the branch
+5. Confirm, then optionally delete the branch
 
-The main workspace cannot be deleted.
+Use `--force` to skip both confirmations (auto-deletes the branch too). The main workspace cannot be deleted.
+
+### Archive and resume a workspace
+
+To free up a workspace without losing your work:
+
+1. `workspace delete myapp my-feature` — answer **yes** to remove the worktree, **no** to keep the branch
+2. The worktree is removed but your branch and commits remain in git
+3. Later, `workspace resume myapp my-feature` — detects the existing branch, creates a fresh worktree from it, allocates new ports, and starts a new tmux session
+
+This is useful when you want to park a feature and reclaim the disk space / Redis DB / ports, then pick it back up later.
 
 ### List workspaces
 
@@ -199,8 +215,14 @@ Each workspace gets:
 ├── .env.test                 # Forces Vite to compile in test env
 ├── Procfile.workspace        # Generated from template or default
 └── docs/
-    └── my-feature.md         # Feature notes template
+    └── my-feature.md         # Feature scratchpad
 ```
+
+### Feature scratchpad (`docs/<feature>.md`)
+
+Each feature workspace gets a notes file that opens in vim when the workspace starts. Use it as a scratchpad for AI-assisted development: add context about what you're building, questions, tasks, reminders, and decisions made along the way. Point Claude at it so it has context for your feature.
+
+When the feature is complete, ask Claude to convert the scratchpad into documentation that can serve as memory/context for future changes or as a reference if you need a reminder of how something works.
 
 ## Environment Variables
 

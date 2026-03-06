@@ -112,6 +112,22 @@ is_main_workspace() {
     [[ "$feature" == "main" || "$feature" == "master" ]]
 }
 
+# Detect the default branch for a project (main or master)
+default_branch() {
+    local ref
+    ref=$(git -C "$PROJECT_PATH" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null)
+    if [[ -n "$ref" ]]; then
+        echo "${ref##*/}"
+        return
+    fi
+    # Fallback: check which branch exists on origin
+    if git -C "$PROJECT_PATH" rev-parse --verify origin/main &>/dev/null; then
+        echo "main"
+    else
+        echo "master"
+    fi
+}
+
 # Display a banner in a tmux pane. Writes a self-deleting script to avoid
 # send-keys line-length issues with long printf strings.
 show_banner() {
@@ -296,12 +312,14 @@ cmd_new() {
 
     if [[ "$is_main" == false ]]; then
         # Fetch latest from origin
-        echo -e "${YELLOW}Fetching latest from origin...${NC}"
-        git -C "$PROJECT_PATH" fetch origin master
+        local base_branch
+        base_branch=$(default_branch)
+        echo -e "${YELLOW}Fetching latest from origin/$base_branch...${NC}"
+        git -C "$PROJECT_PATH" fetch origin "$base_branch"
 
         # Create new worktree with a new branch
         echo -e "${YELLOW}Creating git worktree...${NC}"
-        git -C "$PROJECT_PATH" worktree add -b "$feature" "$workspace_dir" origin/master
+        git -C "$PROJECT_PATH" worktree add -b "$feature" "$workspace_dir" "origin/$base_branch"
 
         # Copy .env file if it exists in main workspace
         if [[ -f "$PROJECT_PATH/.env" ]]; then
@@ -430,19 +448,16 @@ echo -e "${GREEN}Setup complete!${NC}"
 echo ""
 SETUP_SCRIPT
 
-    # Append the server start to the setup script
-    cat >> "$workspace_dir/.workspace-setup.sh" << EOF
-echo ""
-echo -e "${GREEN}Starting overmind...${NC}"
-echo ""
-rm -f "\$0"  # Clean up this script
-exec overmind start -f Procfile.workspace
+    # Append cleanup to the setup script
+    cat >> "$workspace_dir/.workspace-setup.sh" << 'EOF'
+rm -f "$0"  # Clean up this script
 EOF
 
     chmod +x "$workspace_dir/.workspace-setup.sh"
 
-    # Run the setup script in the server window
-    tmux send-keys -t "$tmux_session:server" "./.workspace-setup.sh" C-m
+    # Run setup then start overmind. The setup script self-deletes, so on
+    # subsequent up-arrow replays the test -x silently skips it.
+    tmux send-keys -t "$tmux_session:server" "test -x ./.workspace-setup.sh && ./.workspace-setup.sh; overmind start -f Procfile.workspace" C-m
 
     # Go back to first window, focus on vim pane
     tmux select-window -t "$tmux_session:code"
@@ -668,19 +683,16 @@ echo -e "${GREEN}Setup complete!${NC}"
 echo ""
 SETUP_SCRIPT
 
-    # Append the server start to the setup script
-    cat >> "$workspace_dir/.workspace-setup.sh" << EOF
-echo ""
-echo -e "${GREEN}Starting overmind...${NC}"
-echo ""
-rm -f "\$0"  # Clean up this script
-exec overmind start -f Procfile.workspace
+    # Append cleanup to the setup script
+    cat >> "$workspace_dir/.workspace-setup.sh" << 'EOF'
+rm -f "$0"  # Clean up this script
 EOF
 
     chmod +x "$workspace_dir/.workspace-setup.sh"
 
-    # Run the setup script in the server window
-    tmux send-keys -t "$tmux_session:server" "./.workspace-setup.sh" C-m
+    # Run setup then start overmind. The setup script self-deletes, so on
+    # subsequent up-arrow replays the test -x silently skips it.
+    tmux send-keys -t "$tmux_session:server" "test -x ./.workspace-setup.sh && ./.workspace-setup.sh; overmind start -f Procfile.workspace" C-m
 
     # Go back to first window, focus on vim pane
     tmux select-window -t "$tmux_session:code"
@@ -1027,19 +1039,16 @@ echo -e "${GREEN}Setup complete!${NC}"
 echo ""
 SETUP_SCRIPT
 
-    # Append the server start to the setup script
-    cat >> "$workspace_dir/.workspace-setup.sh" << EOF
-echo ""
-echo -e "${GREEN}Starting overmind...${NC}"
-echo ""
-rm -f "\$0"  # Clean up this script
-exec overmind start -f Procfile.workspace
+    # Append cleanup to the setup script
+    cat >> "$workspace_dir/.workspace-setup.sh" << 'EOF'
+rm -f "$0"  # Clean up this script
 EOF
 
     chmod +x "$workspace_dir/.workspace-setup.sh"
 
-    # Run the setup script in the server window
-    tmux send-keys -t "$tmux_session:server" "./.workspace-setup.sh" C-m
+    # Run setup then start overmind. The setup script self-deletes, so on
+    # subsequent up-arrow replays the test -x silently skips it.
+    tmux send-keys -t "$tmux_session:server" "test -x ./.workspace-setup.sh && ./.workspace-setup.sh; overmind start -f Procfile.workspace" C-m
 
     # Go back to first window, focus on vim pane
     tmux select-window -t "$tmux_session:code"
