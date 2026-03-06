@@ -48,6 +48,10 @@ _workspace_completions() {
                 | grep -v "^${project_path} " \
                 | awk '{print $1}' \
                 | while read -r p; do basename "$p"; done)
+            # Include main if initialized (for resume/stop only)
+            if [[ "$command" != "delete" && -f "$project_path/Procfile.workspace" ]]; then
+                features="$features main"
+            fi
             COMPREPLY=($(compgen -W "$features" -- "$cur"))
         fi
         return

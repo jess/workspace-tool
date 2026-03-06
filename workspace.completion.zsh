@@ -48,6 +48,10 @@ _workspace() {
                         | grep -v "^${project_path} " \
                         | awk '{print $1}' \
                         | while read -r p; do basename "$p"; done))
+                    # Include main if initialized
+                    if [[ "$command" != "delete" && -f "$project_path/Procfile.workspace" ]]; then
+                        features+=("main")
+                    fi
                     _describe 'feature' features
                 fi
             fi

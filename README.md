@@ -5,6 +5,7 @@ A tool for managing multiple git worktree-based development workspaces across Ra
 ## Features
 
 - Create isolated workspaces using git worktrees
+- Initialize the main checkout as a workspace with port/Redis allocation
 - Pull remote branches into workspaces (with PR description fetching)
 - Resume existing workspaces with a single command
 - Auto-configured tmux sessions with vim + shell + server windows
@@ -50,12 +51,13 @@ Each workspace gets its own Redis DB number (1-15) to avoid data conflicts. The 
 - git
 - tmux
 - overmind
+- gum (for styled output)
 - gh (optional, for PR status in `list` and PR descriptions in `pull`)
 
 ### macOS
 
 ```bash
-brew install tmux overmind gh
+brew install tmux overmind gum gh
 ```
 
 ## Installation
@@ -90,23 +92,29 @@ projects:
 
 ### Custom Procfile
 
-Create `Procfile.workspace.template` in your project's main path to customize the Procfile:
+Create `Procfile.workspace.template` in your project's main path. The template is copied as-is into each workspace, so it should reference environment variables from `.env`:
 
 ```
 web: RUBY_DEBUG_OPEN=true bin/rails server -p $RAILS_PORT
-vite: VITE_RUBY_PORT=$VITE_PORT bin/vite dev
+vite: VITE_RUBY_PORT=$VITE_RUBY_PORT bin/vite dev
 worker: bundle exec sidekiq -q default -q mailers
 ```
 
-Available variables:
-- `$RAILS_PORT` - generated Rails server port
-- `$VITE_PORT` - generated Vite port
+Overmind automatically loads `.env` before starting processes, so all workspace-specific variables are available.
 
 If no template exists, a default Rails/Sidekiq Procfile is used.
 
 ## Usage
 
-### Create a workspace
+### Initialize the main checkout
+
+```bash
+workspace new myapp main
+```
+
+Sets up the main project directory as a workspace with port/Redis allocation, a `Procfile.workspace`, and a tmux session — without creating a worktree. Use `main` or `master` as the feature name.
+
+### Create a feature workspace
 
 ```bash
 workspace new myapp my-feature
@@ -132,10 +140,21 @@ Like `new`, but checks out an existing remote branch instead of creating one. If
 ### Resume a workspace
 
 ```bash
-workspace resume myapp my-feature
+workspace resume myapp my-feature   # Resume one workspace
+workspace resume myapp              # Resume all workspaces for project
+workspace resume-all                # Resume all workspaces across all projects
 ```
 
 Re-creates the tmux session and server for an existing worktree (e.g., after a reboot). Reads port configuration from the existing `.env` file.
+
+### Stop a workspace
+
+```bash
+workspace stop myapp my-feature     # Stop one workspace
+workspace stop myapp                # Stop all workspaces for project
+```
+
+Gracefully stops overmind and kills the tmux session.
 
 ### Delete a workspace
 
@@ -145,11 +164,13 @@ workspace delete myapp my-feature --force  # Skip confirmations
 ```
 
 This will:
-1. Kill the tmux session
-2. Stop overmind
+1. Stop overmind
+2. Kill the tmux session
 3. Remove the git worktree
 4. Move any Claude Code sessions to the main project (so they appear in `claude resume`)
 5. Optionally delete the branch
+
+The main workspace cannot be deleted.
 
 ### List workspaces
 
@@ -158,7 +179,15 @@ workspace list              # All projects
 workspace list myapp        # Specific project
 ```
 
-Shows all active worktrees with their tmux status and PR status (open/merged/closed).
+Shows all active worktrees (including main if initialized) with their tmux status and PR status (open/merged/closed).
+
+### Show port allocations
+
+```bash
+workspace ports
+```
+
+Shows Rails port, Vite port, and Redis DB for all workspaces.
 
 ## Workspace Layout
 
@@ -168,8 +197,7 @@ Each workspace gets:
 ~/projects/myapp/my-feature/
 ├── .env                      # Copied from main + workspace settings
 ├── .env.test                 # Forces Vite to compile in test env
-├── .banner                   # Displayed in shell pane
-├── Procfile.workspace        # Generated from template
+├── Procfile.workspace        # Generated from template or default
 └── docs/
     └── my-feature.md         # Feature notes template
 ```
@@ -177,8 +205,9 @@ Each workspace gets:
 ## Environment Variables
 
 Each workspace automatically gets:
+- `RAILS_PORT` - unique Rails server port
+- `VITE_RUBY_PORT` - unique Vite port (RAILS_PORT + 2)
 - `SESSION_COOKIE_NAME` - unique cookie name (`<project>_cookie_<port>`)
-- `VITE_RUBY_PORT` - unique Vite port
 - `REDIS_URL` - unique Redis DB (`redis://localhost:6379/<N>`)
 
 This allows running multiple workspaces simultaneously without conflicts.

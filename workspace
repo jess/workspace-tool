@@ -106,6 +106,32 @@ sanitize_dir_name() {
     echo "${1//\//-}"
 }
 
+# Check if the feature name refers to the main/master workspace
+is_main_workspace() {
+    local feature="$1"
+    [[ "$feature" == "main" || "$feature" == "master" ]]
+}
+
+# Display a banner in a tmux pane. Writes a self-deleting script to avoid
+# send-keys line-length issues with long printf strings.
+show_banner() {
+    local tmux_target="$1"
+    local workspace_dir="$2"
+    local project="$3"
+    local label="$4"
+    local server="$5"
+
+    cat > "$workspace_dir/.show-banner.sh" << BANNER_SCRIPT
+#!/usr/bin/env bash
+clear
+printf "Project: %s\n%s\nServer:  %s" "$project" "$label" "$server" \
+    | gum style --border rounded --border-foreground "#7D56F4" --padding "0 1"
+rm -f "\$0"
+BANNER_SCRIPT
+    chmod +x "$workspace_dir/.show-banner.sh"
+    tmux send-keys -t "$tmux_target" "./.show-banner.sh" C-m
+}
+
 # Find the next available Redis DB number (1-15) by scanning ALL projects' worktrees
 next_free_redis_db() {
     local used_dbs=""
@@ -140,7 +166,7 @@ next_free_redis_db() {
     echo "1"
 }
 
-# Find an unused port by scanning ALL projects' worktrees for VITE_RUBY_PORT
+# Find an unused port by scanning ALL projects' worktrees for RAILS_PORT and VITE_RUBY_PORT
 next_free_port() {
     local used_ports=""
 
@@ -154,9 +180,16 @@ next_free_port() {
             wt_path=$(echo "$line" | awk '{print $1}')
             if [[ -f "$wt_path/.env" ]]; then
                 local port
-                port=$(grep '^VITE_RUBY_PORT=' "$wt_path/.env" | cut -d= -f2 | tr -d '"' || true)
+                port=$(grep '^RAILS_PORT=' "$wt_path/.env" | cut -d= -f2 | tr -d '"' || true)
                 if [[ -n "$port" ]]; then
                     used_ports="$used_ports $port $((port + 2))"
+                fi
+                # Also check legacy VITE_RUBY_PORT-only workspaces
+                if [[ -z "$port" ]]; then
+                    port=$(grep '^VITE_RUBY_PORT=' "$wt_path/.env" | cut -d= -f2 | tr -d '"' || true)
+                    if [[ -n "$port" ]]; then
+                        used_ports="$used_ports $port $((port - 2))"
+                    fi
                 fi
             fi
         done <<< "$(git -C "$proj_path" worktree list 2>/dev/null)"
@@ -221,17 +254,32 @@ cmd_new() {
     validate_project "$project"
     get_project_paths "$project"
 
-    local workspace_dir="$WORKTREE_DIR/$(sanitize_dir_name "$feature")"
+    local is_main=false
+    local workspace_dir
 
-    # Check if directory already exists
-    if [[ -d "$workspace_dir" ]]; then
-        echo -e "${RED}Error: Directory $workspace_dir already exists${NC}"
-        exit 1
+    if is_main_workspace "$feature"; then
+        is_main=true
+        workspace_dir="$PROJECT_PATH"
+
+        # Check if already initialized
+        if [[ -f "$workspace_dir/Procfile.workspace" ]]; then
+            echo -e "${RED}Error: Main workspace already initialized${NC}"
+            echo -e "Use ${YELLOW}workspace resume $project main${NC} to restart it."
+            exit 1
+        fi
+    else
+        workspace_dir="$WORKTREE_DIR/$(sanitize_dir_name "$feature")"
+
+        # Check if directory already exists
+        if [[ -d "$workspace_dir" ]]; then
+            echo -e "${RED}Error: Directory $workspace_dir already exists${NC}"
+            exit 1
+        fi
     fi
 
-    local random_port
-    random_port=$(next_free_port)
-    local rails_port=$((random_port + 2))
+    local rails_port
+    rails_port=$(next_free_port)
+    local vite_port=$((rails_port + 2))
     local server_url="http://localhost:$rails_port"
     local session_cookie="${project}_cookie_${rails_port}"
     local redis_db
@@ -240,31 +288,33 @@ cmd_new() {
     echo -e "${GREEN}Creating new workspace: $feature${NC}"
     echo -e "  Project:             $project"
     echo -e "  Workspace directory: $workspace_dir"
-    echo -e "  Vite port:           $random_port"
     echo -e "  Rails port:          $rails_port"
+    echo -e "  Vite port:           $vite_port"
     echo -e "  Session cookie:      $session_cookie"
     echo -e "  Redis DB:            $redis_db"
     echo ""
 
-    # Fetch latest from origin
-    echo -e "${YELLOW}Fetching latest from origin...${NC}"
-    git -C "$PROJECT_PATH" fetch origin master
+    if [[ "$is_main" == false ]]; then
+        # Fetch latest from origin
+        echo -e "${YELLOW}Fetching latest from origin...${NC}"
+        git -C "$PROJECT_PATH" fetch origin master
 
-    # Create new worktree with a new branch
-    echo -e "${YELLOW}Creating git worktree...${NC}"
-    git -C "$PROJECT_PATH" worktree add -b "$feature" "$workspace_dir" origin/master
+        # Create new worktree with a new branch
+        echo -e "${YELLOW}Creating git worktree...${NC}"
+        git -C "$PROJECT_PATH" worktree add -b "$feature" "$workspace_dir" origin/master
 
-    # Copy .env file if it exists in main workspace
-    if [[ -f "$PROJECT_PATH/.env" ]]; then
-        echo -e "${YELLOW}Copying .env file...${NC}"
-        cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
-    fi
+        # Copy .env file if it exists in main workspace
+        if [[ -f "$PROJECT_PATH/.env" ]]; then
+            echo -e "${YELLOW}Copying .env file...${NC}"
+            cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
+        fi
 
-    # Copy Claude Code settings so permissions carry over
-    if [[ -f "$PROJECT_PATH/.claude/settings.local.json" ]]; then
-        echo -e "${YELLOW}Copying Claude Code settings...${NC}"
-        mkdir -p "$workspace_dir/.claude"
-        cp "$PROJECT_PATH/.claude/settings.local.json" "$workspace_dir/.claude/settings.local.json"
+        # Copy Claude Code settings so permissions carry over
+        if [[ -f "$PROJECT_PATH/.claude/settings.local.json" ]]; then
+            echo -e "${YELLOW}Copying Claude Code settings...${NC}"
+            mkdir -p "$workspace_dir/.claude"
+            cp "$PROJECT_PATH/.claude/settings.local.json" "$workspace_dir/.claude/settings.local.json"
+        fi
     fi
 
     # Update .env file with workspace-specific settings
@@ -272,16 +322,17 @@ cmd_new() {
 
     # Remove existing workspace-specific vars if present
     if [[ -f "$workspace_dir/.env" ]]; then
-        grep -v '^SESSION_COOKIE_NAME=' "$workspace_dir/.env" | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
+        grep -v '^RAILS_PORT=' "$workspace_dir/.env" | grep -v '^SESSION_COOKIE_NAME=' | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
         mv "$workspace_dir/.env.tmp" "$workspace_dir/.env"
     fi
 
     # Append workspace-specific settings
     cat >> "$workspace_dir/.env" << EOF
 
-# Workspace-specific settings (port: $random_port)
+# Workspace-specific settings
+RAILS_PORT=$rails_port
+VITE_RUBY_PORT=$vite_port
 SESSION_COOKIE_NAME="$session_cookie"
-VITE_RUBY_PORT=$random_port
 REDIS_URL=redis://localhost:6379/$redis_db
 EOF
 
@@ -295,15 +346,12 @@ EOF
     local template_file="$PROJECT_PATH/Procfile.workspace.template"
 
     if [[ -f "$template_file" ]]; then
-        # Use project-specific template with variable substitution
-        sed -e "s/\$RAILS_PORT/$rails_port/g" \
-            -e "s/\$VITE_PORT/$random_port/g" \
-            "$template_file" > "$workspace_dir/Procfile.workspace"
+        cp "$template_file" "$workspace_dir/Procfile.workspace"
     else
-        # Default Rails Procfile
-        cat > "$workspace_dir/Procfile.workspace" << EOF
-web: RUBY_DEBUG_OPEN=true bin/rails server -p $rails_port
-vite: VITE_RUBY_PORT=$random_port bin/vite dev
+        # Default Rails Procfile — reads ports from .env
+        cat > "$workspace_dir/Procfile.workspace" << 'EOF'
+web: RUBY_DEBUG_OPEN=true bin/rails server -p $RAILS_PORT
+vite: bin/vite dev
 worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
     fi
@@ -312,9 +360,10 @@ EOF
     local tmux_session="${project}-${feature}"
     echo -e "${YELLOW}Creating tmux session: $tmux_session${NC}"
 
-    # Create docs directory and feature notes file
-    mkdir -p "$workspace_dir/docs"
-    cat > "$workspace_dir/docs/$feature.md" << EOF
+    if [[ "$is_main" == false ]]; then
+        # Create docs directory and feature notes file
+        mkdir -p "$workspace_dir/docs"
+        cat > "$workspace_dir/docs/$feature.md" << EOF
 # New Feature - $feature
 
 ---
@@ -325,25 +374,25 @@ Path:        $workspace_dir
 
 Start describing your new feature...
 EOF
+    fi
 
     # Create tmux session with first window for coding
     tmux new-session -d -s "$tmux_session" -c "$workspace_dir" -n "code"
 
     # Split first window vertically: vim on left, shell on right
-    tmux send-keys -t "$tmux_session:code" "vim docs/$feature.md" C-m
+    if [[ "$is_main" == false ]]; then
+        tmux send-keys -t "$tmux_session:code" "vim docs/$feature.md" C-m
+    else
+        tmux send-keys -t "$tmux_session:code" "vim" C-m
+    fi
     tmux split-window -h -t "$tmux_session:code" -c "$workspace_dir"
 
-    # Create banner file and display in shell pane
-    cat > "$workspace_dir/.banner" << EOF
-
-   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-   ┃  Project: $project
-   ┃  Feature: $feature
-   ┃  Server:  $server_url
-   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-EOF
-    tmux send-keys -t "$tmux_session:code.1" "clear && cat .banner" C-m
+    # Display banner in shell pane
+    if [[ "$is_main" == true ]]; then
+        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  main" "$server_url"
+    else
+        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Feature: $feature" "$server_url"
+    fi
 
     # Create second window for server
     tmux new-window -t "$tmux_session" -c "$workspace_dir" -n "server"
@@ -410,9 +459,11 @@ EOF
     echo ""
     echo -e "Or if not in tmux:"
     echo -e "  ${YELLOW}tmux attach -t $tmux_session${NC}"
-    echo ""
-    echo -e "To delete this workspace later:"
-    echo -e "  ${YELLOW}workspace delete $project $feature${NC}"
+    if [[ "$is_main" == false ]]; then
+        echo ""
+        echo -e "To delete this workspace later:"
+        echo -e "  ${YELLOW}workspace delete $project $feature${NC}"
+    fi
 }
 
 # ============================================================================
@@ -441,9 +492,9 @@ cmd_pull() {
         exit 1
     fi
 
-    local random_port
-    random_port=$(next_free_port)
-    local rails_port=$((random_port + 2))
+    local rails_port
+    rails_port=$(next_free_port)
+    local vite_port=$((rails_port + 2))
     local server_url="http://localhost:$rails_port"
     local session_cookie="${project}_cookie_${rails_port}"
 
@@ -453,8 +504,8 @@ cmd_pull() {
     echo -e "${GREEN}Pulling remote branch: $branch${NC}"
     echo -e "  Project:             $project"
     echo -e "  Workspace directory: $workspace_dir"
-    echo -e "  Vite port:           $random_port"
     echo -e "  Rails port:          $rails_port"
+    echo -e "  Vite port:           $vite_port"
     echo -e "  Session cookie:      $session_cookie"
     echo -e "  Redis DB:            $redis_db"
     echo ""
@@ -485,16 +536,17 @@ cmd_pull() {
 
     # Remove existing workspace-specific vars if present
     if [[ -f "$workspace_dir/.env" ]]; then
-        grep -v '^SESSION_COOKIE_NAME=' "$workspace_dir/.env" | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
+        grep -v '^RAILS_PORT=' "$workspace_dir/.env" | grep -v '^SESSION_COOKIE_NAME=' | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
         mv "$workspace_dir/.env.tmp" "$workspace_dir/.env"
     fi
 
     # Append workspace-specific settings
     cat >> "$workspace_dir/.env" << EOF
 
-# Workspace-specific settings (port: $random_port)
+# Workspace-specific settings
+RAILS_PORT=$rails_port
+VITE_RUBY_PORT=$vite_port
 SESSION_COOKIE_NAME="$session_cookie"
-VITE_RUBY_PORT=$random_port
 REDIS_URL=redis://localhost:6379/$redis_db
 EOF
 
@@ -508,15 +560,12 @@ EOF
     local template_file="$PROJECT_PATH/Procfile.workspace.template"
 
     if [[ -f "$template_file" ]]; then
-        # Use project-specific template with variable substitution
-        sed -e "s/\$RAILS_PORT/$rails_port/g" \
-            -e "s/\$VITE_PORT/$random_port/g" \
-            "$template_file" > "$workspace_dir/Procfile.workspace"
+        cp "$template_file" "$workspace_dir/Procfile.workspace"
     else
-        # Default Rails Procfile
-        cat > "$workspace_dir/Procfile.workspace" << EOF
-web: RUBY_DEBUG_OPEN=true bin/rails server -p $rails_port
-vite: VITE_RUBY_PORT=$random_port bin/vite dev
+        # Default Rails Procfile — reads ports from .env
+        cat > "$workspace_dir/Procfile.workspace" << 'EOF'
+web: RUBY_DEBUG_OPEN=true bin/rails server -p $RAILS_PORT
+vite: bin/vite dev
 worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
     fi
@@ -580,17 +629,8 @@ EOF
     tmux send-keys -t "$tmux_session:code" "vim \"$notes_file\"" C-m
     tmux split-window -h -t "$tmux_session:code" -c "$workspace_dir"
 
-    # Create banner file and display in shell pane
-    cat > "$workspace_dir/.banner" << EOF
-
-   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-   ┃  Project: $project
-   ┃  Branch:  $branch
-   ┃  Server:  $server_url
-   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-EOF
-    tmux send-keys -t "$tmux_session:code.1" "clear && cat .banner" C-m
+    # Display banner in shell pane
+    show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  $branch" "$server_url"
 
     # Create second window for server
     tmux new-window -t "$tmux_session" -c "$workspace_dir" -n "server"
@@ -690,24 +730,36 @@ cmd_resume() {
 
         local workspace_worktrees
         workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
-        [[ -z "$workspace_worktrees" ]] && { echo "No workspaces found for $project."; return; }
 
         local to_resume=()
         local already_running=()
 
-        while IFS= read -r line; do
-            local path branch wt_feature
-            path=$(echo "$line" | awk '{print $1}')
-            branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
-            wt_feature=$(basename "$path")
-
-            local tmux_session="${project}-${branch}"
-            if tmux has-session -t "$tmux_session" 2>/dev/null; then
-                already_running+=("$wt_feature")
+        # Check main workspace
+        if [[ -f "$PROJECT_PATH/Procfile.workspace" ]]; then
+            local main_session="${project}-main"
+            if tmux has-session -t "$main_session" 2>/dev/null; then
+                already_running+=("main")
             else
-                to_resume+=("$wt_feature")
+                to_resume+=("main")
             fi
-        done <<< "$workspace_worktrees"
+        fi
+
+        # Check feature worktrees
+        if [[ -n "$workspace_worktrees" ]]; then
+            while IFS= read -r line; do
+                local path branch wt_feature
+                path=$(echo "$line" | awk '{print $1}')
+                branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+                wt_feature=$(basename "$path")
+
+                local tmux_session="${project}-${branch}"
+                if tmux has-session -t "$tmux_session" 2>/dev/null; then
+                    already_running+=("$wt_feature")
+                else
+                    to_resume+=("$wt_feature")
+                fi
+            done <<< "$workspace_worktrees"
+        fi
 
         if [[ ${#to_resume[@]} -eq 0 && ${#already_running[@]} -eq 0 ]]; then
             echo "No workspaces found for $project."
@@ -743,7 +795,19 @@ cmd_resume() {
     fi
 
     local workspace_dir
-    workspace_dir=$(resolve_worktree_path "$project" "$feature")
+
+    if is_main_workspace "$feature"; then
+        workspace_dir="$PROJECT_PATH"
+
+        # Check if main workspace has been initialized
+        if [[ ! -f "$workspace_dir/Procfile.workspace" ]]; then
+            echo -e "${RED}Error: Main workspace not initialized${NC}"
+            echo -e "Use ${YELLOW}workspace new $project main${NC} to initialize it."
+            exit 1
+        fi
+    else
+        workspace_dir=$(resolve_worktree_path "$project" "$feature")
+    fi
 
     # If no worktree exists, check if the branch exists and create worktree from it
     if [[ -z "$workspace_dir" ]]; then
@@ -760,9 +824,9 @@ cmd_resume() {
         echo -e "${GREEN}Creating workspace from existing branch: $feature${NC}"
 
         # Generate ports and settings
-        local random_port
-        random_port=$(next_free_port)
-        local rails_port=$((random_port + 2))
+        local rails_port
+        rails_port=$(next_free_port)
+        local vite_port=$((rails_port + 2))
         local server_url="http://localhost:$rails_port"
         local session_cookie="${project}_cookie_${rails_port}"
         local redis_db
@@ -770,8 +834,8 @@ cmd_resume() {
 
         echo -e "  Project:             $project"
         echo -e "  Workspace directory: $workspace_dir"
-        echo -e "  Vite port:           $random_port"
         echo -e "  Rails port:          $rails_port"
+        echo -e "  Vite port:           $vite_port"
         echo -e "  Session cookie:      $session_cookie"
         echo -e "  Redis DB:            $redis_db"
         echo ""
@@ -796,15 +860,16 @@ cmd_resume() {
         # Update .env file with workspace-specific settings
         echo -e "${YELLOW}Configuring .env...${NC}"
         if [[ -f "$workspace_dir/.env" ]]; then
-            grep -v '^SESSION_COOKIE_NAME=' "$workspace_dir/.env" | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
+            grep -v '^RAILS_PORT=' "$workspace_dir/.env" | grep -v '^SESSION_COOKIE_NAME=' | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
             mv "$workspace_dir/.env.tmp" "$workspace_dir/.env"
         fi
 
         cat >> "$workspace_dir/.env" << EOF
 
-# Workspace-specific settings (port: $random_port)
+# Workspace-specific settings
+RAILS_PORT=$rails_port
+VITE_RUBY_PORT=$vite_port
 SESSION_COOKIE_NAME="$session_cookie"
-VITE_RUBY_PORT=$random_port
 REDIS_URL=redis://localhost:6379/$redis_db
 EOF
 
@@ -817,13 +882,11 @@ EOF
         echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
         local template_file="$PROJECT_PATH/Procfile.workspace.template"
         if [[ -f "$template_file" ]]; then
-            sed -e "s/\$RAILS_PORT/$rails_port/g" \
-                -e "s/\$VITE_PORT/$random_port/g" \
-                "$template_file" > "$workspace_dir/Procfile.workspace"
+            cp "$template_file" "$workspace_dir/Procfile.workspace"
         else
-            cat > "$workspace_dir/Procfile.workspace" << EOF
-web: RUBY_DEBUG_OPEN=true bin/rails server -p $rails_port
-vite: VITE_RUBY_PORT=$random_port bin/vite dev
+            cat > "$workspace_dir/Procfile.workspace" << 'EOF'
+web: RUBY_DEBUG_OPEN=true bin/rails server -p $RAILS_PORT
+vite: bin/vite dev
 worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
         fi
@@ -853,7 +916,11 @@ EOF
 
     # Derive tmux session name from the actual branch in the worktree
     local worktree_branch
-    worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
+    if is_main_workspace "$feature"; then
+        worktree_branch="main"
+    else
+        worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
+    fi
     local tmux_session="${project}-${worktree_branch:-$feature}"
 
     # Check if tmux session already exists
@@ -873,10 +940,16 @@ EOF
         local rails_port=""
         local server_url=""
         if [[ -f "$workspace_dir/.env" ]]; then
-            local vite_port
-            vite_port=$(grep '^VITE_RUBY_PORT=' "$workspace_dir/.env" | cut -d= -f2 | tr -d '"' || true)
-            if [[ -n "$vite_port" ]]; then
-                rails_port=$((vite_port + 2))
+            rails_port=$(grep '^RAILS_PORT=' "$workspace_dir/.env" | cut -d= -f2 | tr -d '"' || true)
+            # Fall back to deriving from VITE_RUBY_PORT for legacy workspaces
+            if [[ -z "$rails_port" ]]; then
+                local vite_port
+                vite_port=$(grep '^VITE_RUBY_PORT=' "$workspace_dir/.env" | cut -d= -f2 | tr -d '"' || true)
+                if [[ -n "$vite_port" ]]; then
+                    rails_port=$((vite_port - 2))
+                fi
+            fi
+            if [[ -n "$rails_port" ]]; then
                 server_url="http://localhost:$rails_port"
             fi
         fi
@@ -911,17 +984,12 @@ EOF
     # Split first window vertically: vim on left, shell on right
     tmux split-window -h -t "$tmux_session:code" -c "$workspace_dir"
 
-    # Create banner file and display in shell pane
-    cat > "$workspace_dir/.banner" << EOF
-
-   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-   ┃  Project: $project
-   ┃  Feature: $feature
-   ┃  Server:  ${server_url:-"(unknown)"}
-   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
-EOF
-    tmux send-keys -t "$tmux_session:code.1" "clear && cat .banner" C-m
+    # Display banner in shell pane
+    if is_main_workspace "$feature"; then
+        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  main" "${server_url:-"(unknown)"}"
+    else
+        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Feature: $feature" "${server_url:-"(unknown)"}"
+    fi
 
     # Create second window for server
     tmux new-window -t "$tmux_session" -c "$workspace_dir" -n "server"
@@ -1004,15 +1072,22 @@ stop_one_workspace() {
     local tmux_session="${project}-${worktree_branch}"
     local stopped=false
 
-    if tmux has-session -t "$tmux_session" 2>/dev/null; then
-        echo -e "${YELLOW}Killing tmux session: $tmux_session${NC}"
-        tmux kill-session -t "$tmux_session"
+    if [[ -S "$workspace_dir/.overmind.sock" ]]; then
+        echo -e "${YELLOW}Stopping overmind in $workspace_dir...${NC}"
+        (cd "$workspace_dir" && overmind quit 2>/dev/null) || true
+        # Wait for overmind to release the socket
+        local tries=0
+        while [[ -S "$workspace_dir/.overmind.sock" ]] && (( tries < 10 )); do
+            sleep 0.3
+            ((tries++))
+        done
+        rm -f "$workspace_dir/.overmind.sock"
         stopped=true
     fi
 
-    if [[ -f "$workspace_dir/.overmind.sock" ]]; then
-        echo -e "${YELLOW}Stopping overmind in $workspace_dir...${NC}"
-        (cd "$workspace_dir" && overmind quit 2>/dev/null) || true
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+        echo -e "${YELLOW}Killing tmux session: $tmux_session${NC}"
+        tmux kill-session -t "$tmux_session"
         stopped=true
     fi
 
@@ -1041,37 +1116,49 @@ cmd_stop() {
 
     if [[ -n "$feature" ]]; then
         # Stop a single workspace
-        local workspace_dir
-        workspace_dir=$(resolve_worktree_path "$project" "$feature")
-        if [[ -z "$workspace_dir" ]]; then
-            echo -e "${RED}Error: No worktree found for '$feature'${NC}"
-            exit 1
+        if is_main_workspace "$feature"; then
+            stop_one_workspace "$project" "$PROJECT_PATH" "main"
+        else
+            local workspace_dir
+            workspace_dir=$(resolve_worktree_path "$project" "$feature")
+            if [[ -z "$workspace_dir" ]]; then
+                echo -e "${RED}Error: No worktree found for '$feature'${NC}"
+                exit 1
+            fi
+
+            local worktree_branch
+            worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
+
+            stop_one_workspace "$project" "$workspace_dir" "$worktree_branch"
         fi
-
-        local worktree_branch
-        worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
-
-        stop_one_workspace "$project" "$workspace_dir" "$worktree_branch"
     else
         # Stop all workspaces for this project
-        local worktrees
-        worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
-        [[ -z "$worktrees" ]] && { echo "No worktrees found for $project."; return; }
-
-        local workspace_worktrees
-        workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
-        [[ -z "$workspace_worktrees" ]] && { echo "No workspaces found for $project."; return; }
-
         echo -e "${GREEN}Stopping all $project workspaces...${NC}"
         echo ""
 
-        while IFS= read -r line; do
-            local path branch
-            path=$(echo "$line" | awk '{print $1}')
-            branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+        # Stop main workspace if initialized
+        if [[ -f "$PROJECT_PATH/Procfile.workspace" ]]; then
+            stop_one_workspace "$project" "$PROJECT_PATH" "main"
+        fi
 
-            stop_one_workspace "$project" "$path" "$branch"
-        done <<< "$workspace_worktrees"
+        # Stop feature worktrees
+        local worktrees
+        worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
+
+        if [[ -n "$worktrees" ]]; then
+            local workspace_worktrees
+            workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
+
+            if [[ -n "$workspace_worktrees" ]]; then
+                while IFS= read -r line; do
+                    local path branch
+                    path=$(echo "$line" | awk '{print $1}')
+                    branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+
+                    stop_one_workspace "$project" "$path" "$branch"
+                done <<< "$workspace_worktrees"
+            fi
+        fi
     fi
 
     echo ""
@@ -1140,6 +1227,11 @@ cmd_delete() {
         exit 1
     fi
 
+    if is_main_workspace "$feature"; then
+        echo -e "${RED}Error: Cannot delete the main workspace${NC}"
+        exit 1
+    fi
+
     validate_project "$project"
     get_project_paths "$project"
 
@@ -1169,16 +1261,22 @@ cmd_delete() {
     echo -e "  Directory: $workspace_dir"
     echo ""
 
+    # Stop overmind before killing tmux (overmind runs inside tmux)
+    if [[ -S "$workspace_dir/.overmind.sock" ]]; then
+        echo -e "${YELLOW}Stopping overmind...${NC}"
+        (cd "$workspace_dir" && overmind quit 2>/dev/null) || true
+        local tries=0
+        while [[ -S "$workspace_dir/.overmind.sock" ]] && (( tries < 10 )); do
+            sleep 0.3
+            ((tries++))
+        done
+        rm -f "$workspace_dir/.overmind.sock"
+    fi
+
     # Kill tmux session if it exists
     if tmux has-session -t "$tmux_session" 2>/dev/null; then
         echo -e "${YELLOW}Killing tmux session: $tmux_session${NC}"
         tmux kill-session -t "$tmux_session"
-    fi
-
-    # Kill any overmind processes in that directory
-    if [[ -f "$workspace_dir/.overmind.sock" ]]; then
-        echo -e "${YELLOW}Stopping overmind...${NC}"
-        (cd "$workspace_dir" && overmind quit 2>/dev/null) || true
     fi
 
     # Confirm deletion
@@ -1264,12 +1362,25 @@ cmd_list() {
         local workspace_worktrees
         workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
 
-        [[ -z "$workspace_worktrees" ]] && continue
-
         local origin_url=""
         if command -v gh &>/dev/null; then
             origin_url=$(git -C "$PROJECT_PATH" remote get-url origin 2>/dev/null || true)
         fi
+
+        # Check main workspace
+        if [[ -f "$PROJECT_PATH/Procfile.workspace" ]]; then
+            local main_branch
+            main_branch=$(git -C "$PROJECT_PATH" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+            local main_tmux="${project}-main"
+            local main_tmux_status=""
+            if tmux has-session -t "$main_tmux" 2>/dev/null; then
+                main_tmux_status="running"
+            fi
+            local main_tmux_display="${main_tmux_status:-~}"
+            rows+="$project,main,$main_branch,$main_tmux_display,~"$'\n'
+        fi
+
+        [[ -z "$workspace_worktrees" ]] && continue
 
         while IFS= read -r line; do
             local path branch
@@ -1351,7 +1462,21 @@ cmd_ports() {
         worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
         [[ -z "$worktrees" ]] && continue
 
-        # Skip the main project path
+        # Check main workspace
+        if [[ -f "$PROJECT_PATH/Procfile.workspace" && -f "$PROJECT_PATH/.env" ]]; then
+            local main_rails main_vite main_db
+            main_rails=$(grep '^RAILS_PORT=' "$PROJECT_PATH/.env" | cut -d= -f2 | tr -d '"' || true)
+            main_vite=$(grep '^VITE_RUBY_PORT=' "$PROJECT_PATH/.env" | cut -d= -f2 | tr -d '"' || true)
+            main_db=$(grep '^REDIS_URL=' "$PROJECT_PATH/.env" | sed 's|.*redis://[^/]*/||' | tr -d '"' || true)
+            if [[ -z "$main_rails" && -n "$main_vite" ]]; then
+                main_rails=$((main_vite - 2))
+            fi
+            if [[ -n "$main_rails" || -n "$main_vite" || -n "$main_db" ]]; then
+                rows+="$project,main,$main_rails,$main_vite,$main_db"$'\n'
+            fi
+        fi
+
+        # Feature worktrees
         local workspace_worktrees
         workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
         [[ -z "$workspace_worktrees" ]] && continue
@@ -1361,16 +1486,16 @@ cmd_ports() {
             path=$(echo "$line" | awk '{print $1}')
             [[ -f "$path/.env" ]] || continue
 
-            local vite_port rails_port db
+            local rails_port vite_port db
+            rails_port=$(grep '^RAILS_PORT=' "$path/.env" | cut -d= -f2 | tr -d '"' || true)
             vite_port=$(grep '^VITE_RUBY_PORT=' "$path/.env" | cut -d= -f2 | tr -d '"' || true)
             db=$(grep '^REDIS_URL=' "$path/.env" | sed 's|.*redis://[^/]*/||' | tr -d '"' || true)
-
-            [[ -z "$vite_port" && -z "$db" ]] && continue
-
-            rails_port=""
-            if [[ -n "$vite_port" ]]; then
-                rails_port=$((vite_port + 2))
+            # Legacy fallback: derive rails port from vite port
+            if [[ -z "$rails_port" && -n "$vite_port" ]]; then
+                rails_port=$((vite_port - 2))
             fi
+
+            [[ -z "$rails_port" && -z "$vite_port" && -z "$db" ]] && continue
 
             local feature
             feature=$(basename "$path")
@@ -1414,25 +1539,37 @@ cmd_resume_all() {
         worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
         [[ -z "$worktrees" ]] && continue
 
+        # Check main workspace
+        if [[ -f "$PROJECT_PATH/Procfile.workspace" ]]; then
+            local main_session="${project}-main"
+            if tmux has-session -t "$main_session" 2>/dev/null; then
+                already_running+=("$project/main")
+            else
+                to_resume+=("$project main")
+            fi
+        fi
+
+        # Check feature worktrees
         local workspace_worktrees
         workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
-        [[ -z "$workspace_worktrees" ]] && continue
 
-        while IFS= read -r line; do
-            local path branch
-            path=$(echo "$line" | awk '{print $1}')
-            branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+        if [[ -n "$workspace_worktrees" ]]; then
+            while IFS= read -r line; do
+                local path branch
+                path=$(echo "$line" | awk '{print $1}')
+                branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
 
-            local feature
-            feature=$(basename "$path")
+                local feature
+                feature=$(basename "$path")
 
-            local tmux_session="${project}-${branch}"
-            if tmux has-session -t "$tmux_session" 2>/dev/null; then
-                already_running+=("$project/$feature")
-            else
-                to_resume+=("$project $feature")
-            fi
-        done <<< "$workspace_worktrees"
+                local tmux_session="${project}-${branch}"
+                if tmux has-session -t "$tmux_session" 2>/dev/null; then
+                    already_running+=("$project/$feature")
+                else
+                    to_resume+=("$project $feature")
+                fi
+            done <<< "$workspace_worktrees"
+        fi
     done
 
     if [[ ${#to_resume[@]} -eq 0 && ${#already_running[@]} -eq 0 ]]; then
@@ -1480,6 +1617,7 @@ usage() {
     echo ""
     echo "Commands:"
     echo "  new <project> <feature>      Create a new workspace (new branch off master)"
+    echo "  new <project> main           Initialize the main checkout as a workspace"
     echo "  pull <project> <branch>      Pull a remote branch into a new workspace"
     echo "  resume <project> [feature]   Resume workspace(s) (all for project if no feature given)"
     echo "  resume-all                   Resume all workspaces (useful after reboot)"
@@ -1489,6 +1627,7 @@ usage() {
     echo "  ports                        Show all port and Redis allocations"
     echo ""
     echo "Examples:"
+    echo "  workspace new tract main"
     echo "  workspace new tract my-feature"
     echo "  workspace pull tract remote-branch"
     echo "  workspace resume tract my-feature"
