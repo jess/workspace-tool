@@ -15,7 +15,7 @@ Opinionated? Absolutely. It assumes you're running Rails, tmux, overmind, and vi
 - Auto-configured tmux sessions with vim + shell + server windows
 - Random port assignment to avoid conflicts between workspaces
 - Automatic Redis DB allocation (1-15) across all projects
-- Per-project Procfile templates
+- Per-project Procfile customization (direct or via templates)
 - Automatic `.env` copying with workspace-specific overrides
 - Claude Code session consolidation on workspace deletion
 - Shell completions for bash and zsh
@@ -104,7 +104,9 @@ vite: bin/vite dev
 worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 ```
 
-To customize this, create `Procfile.workspace.template` in your project's main path. The template is copied as-is into each workspace, so it should reference environment variables from `.env`:
+To customize this, create a `Procfile.workspace` in your project's main path and it will be copied directly into each new workspace. Alternatively, create a `Procfile.workspace.template` which works the same way but signals that the file is a template. If both exist, `Procfile.workspace` takes precedence.
+
+Since Overmind automatically loads `.env` before starting processes, your Procfile can reference environment variables:
 
 ```
 web: RUBY_DEBUG_OPEN=true bin/rails server -p $RAILS_PORT
@@ -112,7 +114,6 @@ vite: VITE_RUBY_PORT=$VITE_RUBY_PORT bin/vite dev
 worker: bundle exec sidekiq -q default -q mailers
 ```
 
-Overmind automatically loads `.env` before starting processes, so all workspace-specific variables are available.
 
 ## Usage
 
@@ -217,7 +218,7 @@ Each workspace gets:
 ~/projects/myapp/my-feature/
 ├── .env                      # Copied from main + workspace settings
 ├── .env.test                 # Forces Vite to compile in test env
-├── Procfile.workspace        # Generated from template or default
+├── Procfile.workspace        # Copied from project or generated from default
 └── docs/
     └── my-feature.md         # Feature scratchpad
 ```

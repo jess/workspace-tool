@@ -361,9 +361,12 @@ EOF
 
     # Create a workspace-specific Procfile
     echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
+    local procfile="$PROJECT_PATH/Procfile.workspace"
     local template_file="$PROJECT_PATH/Procfile.workspace.template"
 
-    if [[ -f "$template_file" ]]; then
+    if [[ -f "$procfile" ]]; then
+        cp "$procfile" "$workspace_dir/Procfile.workspace"
+    elif [[ -f "$template_file" ]]; then
         cp "$template_file" "$workspace_dir/Procfile.workspace"
     else
         # Default Rails Procfile — reads ports from .env
@@ -572,9 +575,12 @@ EOF
 
     # Create a workspace-specific Procfile
     echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
+    local procfile="$PROJECT_PATH/Procfile.workspace"
     local template_file="$PROJECT_PATH/Procfile.workspace.template"
 
-    if [[ -f "$template_file" ]]; then
+    if [[ -f "$procfile" ]]; then
+        cp "$procfile" "$workspace_dir/Procfile.workspace"
+    elif [[ -f "$template_file" ]]; then
         cp "$template_file" "$workspace_dir/Procfile.workspace"
     else
         # Default Rails Procfile — reads ports from .env
@@ -892,8 +898,11 @@ EOF
 
         # Create Procfile.workspace
         echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
+        local procfile="$PROJECT_PATH/Procfile.workspace"
         local template_file="$PROJECT_PATH/Procfile.workspace.template"
-        if [[ -f "$template_file" ]]; then
+        if [[ -f "$procfile" ]]; then
+            cp "$procfile" "$workspace_dir/Procfile.workspace"
+        elif [[ -f "$template_file" ]]; then
             cp "$template_file" "$workspace_dir/Procfile.workspace"
         else
             cat > "$workspace_dir/Procfile.workspace" << 'EOF'
