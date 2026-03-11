@@ -198,9 +198,11 @@ This is useful when you want to park a feature and reclaim the disk space / Redi
 ```bash
 workspace list              # All projects
 workspace list myapp        # Specific project
+workspace list --pr         # Include PR status (slower, queries GitHub)
+workspace list myapp --pr   # Specific project with PR status
 ```
 
-Shows all active worktrees (including main if initialized) with their tmux status and PR status (open/merged/closed).
+Shows all active worktrees (including main if initialized) with their tmux status. Use `--pr` to include PR status (open/merged/closed) via GitHub CLI.
 
 ### Show port allocations
 

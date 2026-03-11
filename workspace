@@ -1350,7 +1350,15 @@ cmd_delete() {
 # ============================================================================
 
 cmd_list() {
-    local filter_project="$1"
+    local filter_project=""
+    local show_pr=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --pr) show_pr=true; shift ;;
+            *) filter_project="$1"; shift ;;
+        esac
+    done
 
     if [[ -n "$filter_project" ]]; then
         validate_project "$filter_project"
@@ -1381,7 +1389,7 @@ cmd_list() {
         workspace_worktrees=$(echo "$worktrees" | grep -v "^$PROJECT_PATH " || true)
 
         local origin_url=""
-        if command -v gh &>/dev/null; then
+        if [[ "$show_pr" == true ]] && command -v gh &>/dev/null; then
             origin_url=$(git -C "$PROJECT_PATH" remote get-url origin 2>/dev/null || true)
         fi
 
@@ -1395,7 +1403,11 @@ cmd_list() {
                 main_tmux_status="running"
             fi
             local main_tmux_display="${main_tmux_status:-~}"
-            rows+="$project,main,$main_branch,$main_tmux_display,~"$'\n'
+            if [[ "$show_pr" == true ]]; then
+                rows+="$project,main,$main_branch,$main_tmux_display,~"$'\n'
+            else
+                rows+="$project,main,$main_branch,$main_tmux_display"$'\n'
+            fi
         fi
 
         [[ -z "$workspace_worktrees" ]] && continue
@@ -1437,8 +1449,12 @@ cmd_list() {
 
             # Pad tmux/pr values so column alignment uses consistent width
             local tmux_display="${tmux_status:-~}"
-            local pr_display="${pr_status:-~}"
-            rows+="$project,$feature,$branch,$tmux_display,$pr_display"$'\n'
+            if [[ "$show_pr" == true ]]; then
+                local pr_display="${pr_status:-~}"
+                rows+="$project,$feature,$branch,$tmux_display,$pr_display"$'\n'
+            else
+                rows+="$project,$feature,$branch,$tmux_display"$'\n'
+            fi
         done <<< "$workspace_worktrees"
     done
 
@@ -1452,7 +1468,11 @@ cmd_list() {
     fi
 
     local table header_line separator max_width
-    table=$(printf "Project,Workspace,Branch,Tmux,PR\n%s" "$rows" | column -t -s,)
+    local header="Project,Workspace,Branch,Tmux"
+    if [[ "$show_pr" == true ]]; then
+        header="$header,PR"
+    fi
+    table=$(printf "%s\n%s" "$header" "$rows" | column -t -s,)
     header_line=$(echo "$table" | head -1)
     max_width=$(echo "$table" | awk '{ if (length > max) max = length } END { print max }')
     separator=$(printf '%*s' "$max_width" '' | tr ' ' '-')
@@ -1641,7 +1661,7 @@ usage() {
     echo "  resume-all                   Resume all workspaces (useful after reboot)"
     echo "  stop <project> [feature]     Stop workspace(s) without deleting (all for project if no feature given)"
     echo "  delete <project> <feature>   Delete a workspace"
-    echo "  list [project]               List all workspaces"
+    echo "  list [project] [--pr]        List all workspaces (--pr to show PR status)"
     echo "  ports                        Show all port and Redis allocations"
     echo ""
     echo "Examples:"
