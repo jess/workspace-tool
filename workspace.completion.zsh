@@ -9,6 +9,7 @@ _workspace() {
         'resume-all:Resume all workspaces (useful after reboot)'
         'stop:Stop workspace(s) without deleting'
         'delete:Delete a workspace'
+        'info:Show info about the current workspace'
         'list:List all workspaces'
         'ports:Show all port and Redis allocations'
     )

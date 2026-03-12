@@ -1346,6 +1346,105 @@ cmd_delete() {
 }
 
 # ============================================================================
+# Subcommand: info
+# ============================================================================
+
+cmd_info() {
+    local cwd
+    cwd=$(pwd -P)
+
+    local found_project=""
+    local found_feature=""
+    local found_workspace=""
+
+    for project in $(list_projects); do
+        get_project_paths "$project"
+
+        # Check main workspace first
+        local real_project_path
+        real_project_path=$(cd "$PROJECT_PATH" && pwd -P)
+
+        if [[ "$cwd" == "$real_project_path" || "$cwd" == "$real_project_path/"* ]]; then
+            if [[ -f "$PROJECT_PATH/Procfile.workspace" ]]; then
+                found_project="$project"
+                found_feature=$(default_branch)
+                found_workspace="$PROJECT_PATH"
+                break
+            fi
+        fi
+
+        # Check worktrees
+        while IFS= read -r line; do
+            local wt_path
+            wt_path=$(echo "$line" | awk '{print $1}')
+            [[ "$wt_path" == "$real_project_path" ]] && continue
+
+            local real_wt_path
+            real_wt_path=$(cd "$wt_path" 2>/dev/null && pwd -P) || continue
+
+            if [[ "$cwd" == "$real_wt_path" || "$cwd" == "$real_wt_path/"* ]]; then
+                local branch
+                branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
+                found_project="$project"
+                found_feature="$branch"
+                found_workspace="$wt_path"
+                break 2
+            fi
+        done <<< "$(git -C "$PROJECT_PATH" worktree list 2>/dev/null)"
+    done
+
+    if [[ -z "$found_project" ]]; then
+        echo -e "${RED}Not inside a workspace directory${NC}"
+        exit 1
+    fi
+
+    # Read info from .env
+    local rails_port="" redis_db="" server_url=""
+    if [[ -f "$found_workspace/.env" ]]; then
+        rails_port=$(grep '^RAILS_PORT=' "$found_workspace/.env" | cut -d= -f2 | tr -d '"' || true)
+        if [[ -z "$rails_port" ]]; then
+            local vite_port
+            vite_port=$(grep '^VITE_RUBY_PORT=' "$found_workspace/.env" | cut -d= -f2 | tr -d '"' || true)
+            if [[ -n "$vite_port" ]]; then
+                rails_port=$((vite_port - 2))
+            fi
+        fi
+        if [[ -n "$rails_port" ]]; then
+            server_url="http://localhost:$rails_port"
+        fi
+        redis_db=$(grep '^REDIS_URL=' "$found_workspace/.env" | sed 's|.*redis://[^/]*/||' | tr -d '"' || true)
+    fi
+
+    # Check tmux session
+    local tmux_session="${found_project}-${found_feature}"
+    local tmux_status="stopped"
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+        tmux_status="running"
+    fi
+
+    # Check git branch
+    local git_branch
+    git_branch=$(git -C "$found_workspace" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+    echo ""
+    echo -e "  ${BLUE}Project${NC}  $found_project"
+    echo -e "  ${BLUE}Feature${NC}  $found_feature"
+    echo -e "  ${BLUE}Branch${NC}   $git_branch"
+    echo -e "  ${BLUE}Path${NC}     $found_workspace"
+    if [[ -n "$server_url" ]]; then
+        echo -e "  ${BLUE}Server${NC}   ${YELLOW}$server_url${NC}"
+    fi
+    if [[ -n "$rails_port" ]]; then
+        echo -e "  ${BLUE}Port${NC}     $rails_port"
+    fi
+    if [[ -n "$redis_db" ]]; then
+        echo -e "  ${BLUE}Redis${NC}    db $redis_db"
+    fi
+    echo -e "  ${BLUE}Tmux${NC}     $tmux_session ($tmux_status)"
+    echo ""
+}
+
+# ============================================================================
 # Subcommand: list
 # ============================================================================
 
@@ -1661,6 +1760,7 @@ usage() {
     echo "  resume-all                   Resume all workspaces (useful after reboot)"
     echo "  stop <project> [feature]     Stop workspace(s) without deleting (all for project if no feature given)"
     echo "  delete <project> <feature>   Delete a workspace"
+    echo "  info                         Show info about the current workspace"
     echo "  list [project] [--pr]        List all workspaces (--pr to show PR status)"
     echo "  ports                        Show all port and Redis allocations"
     echo ""
@@ -1707,6 +1807,10 @@ main() {
         delete)
             check_config
             cmd_delete "$@"
+            ;;
+        info)
+            check_config
+            cmd_info
             ;;
         list)
             check_config
