@@ -5,8 +5,7 @@ _workspace() {
     local commands=(
         'new:Create a new workspace (new branch off master)'
         'pull:Pull a remote branch into a new workspace'
-        'resume:Resume workspace(s)'
-        'resume-all:Resume all workspaces (useful after reboot)'
+        'resume:Resume workspace(s) (--all for everything)'
         'stop:Stop workspace(s) without deleting'
         'delete:Delete a workspace'
         'info:Show info about the current workspace'
@@ -16,22 +15,46 @@ _workspace() {
 
     _arguments -C \
         '1:command:->command' \
-        '2:project:->project' \
-        '3:feature:->feature' \
+        '*:args:->args' \
         && return
 
     case "$state" in
         command)
             _describe 'command' commands
             ;;
-        project)
-            local projects
-            projects=($(awk '/^  [a-zA-Z_-]+:$/ { proj = $1; gsub(/:$/, "", proj); print proj }' "$config_file" 2>/dev/null))
-            _describe 'project' projects
-            ;;
-        feature)
+        args)
             local command="${words[2]}"
-            if [[ "$command" == "resume" || "$command" == "stop" || "$command" == "delete" ]]; then
+            case "$command" in
+                resume)
+                    # Complete --all or project name at position 2
+                    if [[ $CURRENT -eq 3 ]]; then
+                        local projects
+                        projects=($(awk '/^  [a-zA-Z_-]+:$/ { proj = $1; gsub(/:$/, "", proj); print proj }' "$config_file" 2>/dev/null))
+                        local options=("--all:Resume all workspaces" "${(@)projects}")
+                        _describe 'project or flag' options
+                        return
+                    fi
+                    ;;
+                list)
+                    local flags=('--pr:Show PR status' '--running:Show only active workspaces')
+                    local projects
+                    projects=($(awk '/^  [a-zA-Z_-]+:$/ { proj = $1; gsub(/:$/, "", proj); print proj }' "$config_file" 2>/dev/null))
+                    local options=("${(@)flags}" "${(@)projects}")
+                    _describe 'project or flag' options
+                    return
+                    ;;
+            esac
+
+            # Fall through to project completion at position 2
+            if [[ $CURRENT -eq 3 ]]; then
+                local projects
+                projects=($(awk '/^  [a-zA-Z_-]+:$/ { proj = $1; gsub(/:$/, "", proj); print proj }' "$config_file" 2>/dev/null))
+                _describe 'project' projects
+                return
+            fi
+
+            # Feature completion at position 3
+            if [[ $CURRENT -eq 4 && ("$command" == "resume" || "$command" == "stop" || "$command" == "delete") ]]; then
                 local project="${words[3]}"
                 local project_path
 

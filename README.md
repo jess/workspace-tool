@@ -153,7 +153,7 @@ Like `new`, but checks out an existing remote branch instead of creating one. If
 ```bash
 workspace resume myapp my-feature   # Resume one workspace
 workspace resume myapp              # Resume all workspaces for project
-workspace resume-all                # Resume all workspaces across all projects
+workspace resume --all              # Resume all workspaces across all projects
 ```
 
 Re-creates the tmux session and server for an existing worktree (e.g., after a reboot). Reads port configuration from the existing `.env` file.

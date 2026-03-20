@@ -725,15 +725,22 @@ EOF
 # ============================================================================
 
 cmd_resume() {
+    if [[ "$1" == "--all" ]]; then
+        cmd_resume_all
+        return
+    fi
+
     local project="$1"
     local feature="${2:-}"
 
     if [[ -z "$project" ]]; then
         echo "Usage: workspace resume <project> [feature]"
+        echo "       workspace resume --all"
         echo ""
         echo "Examples:"
         echo "  workspace resume tract my-feature   # resume one workspace"
         echo "  workspace resume tract              # resume all tract workspaces"
+        echo "  workspace resume --all              # resume all workspaces"
         exit 1
     fi
 
@@ -1451,10 +1458,12 @@ cmd_info() {
 cmd_list() {
     local filter_project=""
     local show_pr=false
+    local running_only=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --pr) show_pr=true; shift ;;
+            --running) running_only=true; shift ;;
             *) filter_project="$1"; shift ;;
         esac
     done
@@ -1502,7 +1511,9 @@ cmd_list() {
                 main_tmux_status="running"
             fi
             local main_tmux_display="${main_tmux_status:-~}"
-            if [[ "$show_pr" == true ]]; then
+            if [[ "$running_only" == true && -z "$main_tmux_status" ]]; then
+                : # skip non-running workspace
+            elif [[ "$show_pr" == true ]]; then
                 rows+="$project,main,$main_branch,$main_tmux_display,~"$'\n'
             else
                 rows+="$project,main,$main_branch,$main_tmux_display"$'\n'
@@ -1548,7 +1559,9 @@ cmd_list() {
 
             # Pad tmux/pr values so column alignment uses consistent width
             local tmux_display="${tmux_status:-~}"
-            if [[ "$show_pr" == true ]]; then
+            if [[ "$running_only" == true && -z "$tmux_status" ]]; then
+                continue
+            elif [[ "$show_pr" == true ]]; then
                 local pr_display="${pr_status:-~}"
                 rows+="$project,$feature,$branch,$tmux_display,$pr_display"$'\n'
             else
@@ -1757,11 +1770,11 @@ usage() {
     echo "  new <project> main           Initialize the main checkout as a workspace"
     echo "  pull <project> <branch>      Pull a remote branch into a new workspace"
     echo "  resume <project> [feature]   Resume workspace(s) (all for project if no feature given)"
-    echo "  resume-all                   Resume all workspaces (useful after reboot)"
+    echo "  resume --all                 Resume all workspaces (useful after reboot)"
     echo "  stop <project> [feature]     Stop workspace(s) without deleting (all for project if no feature given)"
     echo "  delete <project> <feature>   Delete a workspace"
     echo "  info                         Show info about the current workspace"
-    echo "  list [project] [--pr]        List all workspaces (--pr to show PR status)"
+    echo "  list [project] [--pr] [--running]  List workspaces (--pr for PR status, --running for active only)"
     echo "  ports                        Show all port and Redis allocations"
     echo ""
     echo "Examples:"
@@ -1798,7 +1811,7 @@ main() {
             ;;
         resume-all)
             check_config
-            cmd_resume_all
+            cmd_resume --all
             ;;
         stop)
             check_config

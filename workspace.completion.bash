@@ -2,7 +2,7 @@ _workspace_completions() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="new pull resume resume-all stop delete info list ports"
+    local commands="new pull resume stop delete info list ports"
     local config_file="$HOME/.workspaces.yml"
 
     # Complete subcommand
@@ -13,11 +13,23 @@ _workspace_completions() {
 
     local command="${words[1]}"
 
-    # Complete project name
+    # Complete project name (or flags for resume/list)
     if [[ $cword -eq 2 ]]; then
         local projects
         projects=$(awk '/^  [a-zA-Z_-]+:$/ { proj = $1; gsub(/:$/, "", proj); print proj }' "$config_file" 2>/dev/null)
-        COMPREPLY=($(compgen -W "$projects" -- "$cur"))
+        if [[ "$command" == "resume" ]]; then
+            COMPREPLY=($(compgen -W "--all $projects" -- "$cur"))
+        elif [[ "$command" == "list" ]]; then
+            COMPREPLY=($(compgen -W "--pr --running $projects" -- "$cur"))
+        else
+            COMPREPLY=($(compgen -W "$projects" -- "$cur"))
+        fi
+        return
+    fi
+
+    # Complete additional flags for list at any position
+    if [[ "$command" == "list" && "$cur" == --* ]]; then
+        COMPREPLY=($(compgen -W "--pr --running" -- "$cur"))
         return
     fi
 
