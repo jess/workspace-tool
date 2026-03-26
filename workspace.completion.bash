@@ -27,6 +27,12 @@ _workspace_completions() {
         return
     fi
 
+    # Complete --existing flag for new at position 3
+    if [[ $cword -eq 4 && "$command" == "new" ]]; then
+        COMPREPLY=($(compgen -W "--existing" -- "$cur"))
+        return
+    fi
+
     # Complete additional flags for list at any position
     if [[ "$command" == "list" && "$cur" == --* ]]; then
         COMPREPLY=($(compgen -W "--pr --running" -- "$cur"))

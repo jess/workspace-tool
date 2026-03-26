@@ -53,6 +53,13 @@ _workspace() {
                 return
             fi
 
+            # Flag completion for new at position 4
+            if [[ $CURRENT -eq 5 && "$command" == "new" ]]; then
+                local flags=('--existing:Reuse an existing local branch')
+                _describe 'flag' flags
+                return
+            fi
+
             # Feature completion at position 3
             if [[ $CURRENT -eq 4 && ("$command" == "resume" || "$command" == "stop" || "$command" == "delete") ]]; then
                 local project="${words[3]}"

@@ -140,6 +140,14 @@ This will:
    - `server` window: runs nvm use, bundle install, yarn install, then overmind
 5. Generate `docs/my-feature.md` with workspace details
 
+### Create a workspace from an existing branch
+
+```bash
+workspace new myapp my-feature --existing
+```
+
+Like `new`, but instead of creating a new branch from the default branch, it creates the worktree from an existing local branch. Useful when you started work directly on a branch in the main checkout and want to move it into its own workspace.
+
 ### Pull a remote branch
 
 ```bash

@@ -259,11 +259,17 @@ resolve_worktree_path() {
 cmd_new() {
     local project="$1"
     local feature="$2"
+    local use_existing=false
+
+    if [[ "$3" == "--existing" ]]; then
+        use_existing=true
+    fi
 
     if [[ -z "$project" ]] || [[ -z "$feature" ]]; then
-        echo "Usage: workspace new <project> <feature>"
+        echo "Usage: workspace new <project> <feature> [--existing]"
         echo ""
         echo "Example: workspace new tract my-feature"
+        echo "         workspace new tract my-feature --existing   # reuse existing branch"
         exit 1
     fi
 
@@ -311,15 +317,30 @@ cmd_new() {
     echo ""
 
     if [[ "$is_main" == false ]]; then
-        # Fetch latest from origin
-        local base_branch
-        base_branch=$(default_branch)
-        echo -e "${YELLOW}Fetching latest from origin/$base_branch...${NC}"
-        git -C "$PROJECT_PATH" fetch origin "$base_branch"
+        if [[ "$use_existing" == true ]]; then
+            # Verify the branch exists locally
+            if ! git -C "$PROJECT_PATH" show-ref --verify --quiet "refs/heads/$feature"; then
+                echo -e "${RED}Error: Branch '$feature' does not exist locally${NC}"
+                echo ""
+                echo "Available local branches:"
+                git -C "$PROJECT_PATH" branch --format='  %(refname:short)'
+                exit 1
+            fi
 
-        # Create new worktree with a new branch
-        echo -e "${YELLOW}Creating git worktree...${NC}"
-        git -C "$PROJECT_PATH" worktree add -b "$feature" "$workspace_dir" "origin/$base_branch"
+            # Create worktree from existing branch
+            echo -e "${YELLOW}Using existing branch: $feature${NC}"
+            echo -e "${YELLOW}Creating git worktree...${NC}"
+            git -C "$PROJECT_PATH" worktree add "$workspace_dir" "$feature"
+        else
+            # Fetch latest and create new branch from origin
+            local base_branch
+            base_branch=$(default_branch)
+            echo -e "${YELLOW}Fetching latest from origin/$base_branch...${NC}"
+            git -C "$PROJECT_PATH" fetch origin "$base_branch"
+
+            echo -e "${YELLOW}Creating git worktree...${NC}"
+            git -C "$PROJECT_PATH" worktree add -b "$feature" "$workspace_dir" "origin/$base_branch"
+        fi
 
         # Copy .env file if it exists in main workspace
         if [[ -f "$PROJECT_PATH/.env" ]]; then
@@ -1767,6 +1788,7 @@ usage() {
     echo ""
     echo "Commands:"
     echo "  new <project> <feature>      Create a new workspace (new branch off master)"
+    echo "  new <project> <feature> --existing  Create a workspace from an existing local branch"
     echo "  new <project> main           Initialize the main checkout as a workspace"
     echo "  pull <project> <branch>      Pull a remote branch into a new workspace"
     echo "  resume <project> [feature]   Resume workspace(s) (all for project if no feature given)"
@@ -1780,6 +1802,7 @@ usage() {
     echo "Examples:"
     echo "  workspace new tract main"
     echo "  workspace new tract my-feature"
+    echo "  workspace new tract my-feature --existing"
     echo "  workspace pull tract remote-branch"
     echo "  workspace resume tract my-feature"
     echo "  workspace resume tract"
