@@ -90,6 +90,14 @@ get_project_paths() {
     PROJECT_PATH=$(expand_path "$(get_project_config "$project" "path")")
     WORKTREE_DIR=$(expand_path "$(get_project_config "$project" "worktree_dir")")
 
+    local redis_val
+    redis_val=$(get_project_config "$project" "redis")
+    if [[ "$redis_val" == "false" ]]; then
+        USES_REDIS=false
+    else
+        USES_REDIS=true
+    fi
+
     if [[ -z "$PROJECT_PATH" ]] || [[ -z "$WORKTREE_DIR" ]]; then
         echo -e "${RED}Error: Project '$project' is missing path or worktree_dir in config${NC}"
         exit 1
@@ -304,8 +312,10 @@ cmd_new() {
     local vite_port=$((rails_port + 2))
     local server_url="http://localhost:$rails_port"
     local session_cookie="${project}_cookie_${rails_port}"
-    local redis_db
-    redis_db=$(next_free_redis_db)
+    local redis_db=""
+    if [[ "$USES_REDIS" == "true" ]]; then
+        redis_db=$(next_free_redis_db)
+    fi
 
     echo -e "${GREEN}Creating new workspace: $feature${NC}"
     echo -e "  Project:             $project"
@@ -313,7 +323,7 @@ cmd_new() {
     echo -e "  Rails port:          $rails_port"
     echo -e "  Vite port:           $vite_port"
     echo -e "  Session cookie:      $session_cookie"
-    echo -e "  Redis DB:            $redis_db"
+    [[ -n "$redis_db" ]] && echo -e "  Redis DB:            $redis_db"
     echo ""
 
     if [[ "$is_main" == false ]]; then
@@ -372,8 +382,10 @@ cmd_new() {
 RAILS_PORT=$rails_port
 VITE_RUBY_PORT=$vite_port
 SESSION_COOKIE_NAME="$session_cookie"
-REDIS_URL=redis://localhost:6379/$redis_db
 EOF
+    if [[ -n "$redis_db" ]]; then
+        echo "REDIS_URL=redis://localhost:6379/$redis_db" >> "$workspace_dir/.env"
+    fi
 
     # Create .env.test to force Vite to compile instead of proxying to dev server
     cat > "$workspace_dir/.env.test" << EOF
@@ -537,8 +549,10 @@ cmd_pull() {
     local server_url="http://localhost:$rails_port"
     local session_cookie="${project}_cookie_${rails_port}"
 
-    local redis_db
-    redis_db=$(next_free_redis_db)
+    local redis_db=""
+    if [[ "$USES_REDIS" == "true" ]]; then
+        redis_db=$(next_free_redis_db)
+    fi
 
     echo -e "${GREEN}Pulling remote branch: $branch${NC}"
     echo -e "  Project:             $project"
@@ -546,7 +560,7 @@ cmd_pull() {
     echo -e "  Rails port:          $rails_port"
     echo -e "  Vite port:           $vite_port"
     echo -e "  Session cookie:      $session_cookie"
-    echo -e "  Redis DB:            $redis_db"
+    [[ -n "$redis_db" ]] && echo -e "  Redis DB:            $redis_db"
     echo ""
 
     # Fetch the remote branch
@@ -586,8 +600,10 @@ cmd_pull() {
 RAILS_PORT=$rails_port
 VITE_RUBY_PORT=$vite_port
 SESSION_COOKIE_NAME="$session_cookie"
-REDIS_URL=redis://localhost:6379/$redis_db
 EOF
+    if [[ -n "$redis_db" ]]; then
+        echo "REDIS_URL=redis://localhost:6379/$redis_db" >> "$workspace_dir/.env"
+    fi
 
     # Create .env.test to force Vite to compile instead of proxying to dev server
     cat > "$workspace_dir/.env.test" << EOF
@@ -875,15 +891,17 @@ cmd_resume() {
         local vite_port=$((rails_port + 2))
         local server_url="http://localhost:$rails_port"
         local session_cookie="${project}_cookie_${rails_port}"
-        local redis_db
-        redis_db=$(next_free_redis_db)
+        local redis_db=""
+        if [[ "$USES_REDIS" == "true" ]]; then
+            redis_db=$(next_free_redis_db)
+        fi
 
         echo -e "  Project:             $project"
         echo -e "  Workspace directory: $workspace_dir"
         echo -e "  Rails port:          $rails_port"
         echo -e "  Vite port:           $vite_port"
         echo -e "  Session cookie:      $session_cookie"
-        echo -e "  Redis DB:            $redis_db"
+        [[ -n "$redis_db" ]] && echo -e "  Redis DB:            $redis_db"
         echo ""
 
         # Create worktree from existing branch
@@ -916,8 +934,10 @@ cmd_resume() {
 RAILS_PORT=$rails_port
 VITE_RUBY_PORT=$vite_port
 SESSION_COOKIE_NAME="$session_cookie"
-REDIS_URL=redis://localhost:6379/$redis_db
 EOF
+        if [[ -n "$redis_db" ]]; then
+            echo "REDIS_URL=redis://localhost:6379/$redis_db" >> "$workspace_dir/.env"
+        fi
 
         # Create .env.test
         cat > "$workspace_dir/.env.test" << EOF

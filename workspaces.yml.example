@@ -16,3 +16,6 @@ projects:
   # another-project:
   #   path: ~/projects/another/web
   #   worktree_dir: ~/projects/another
+  #   redis: false                      # Optional: skip Redis DB allocation
+  #                                     # (defaults to true; set false for apps
+  #                                     # that don't use Redis)
