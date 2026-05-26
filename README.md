@@ -215,10 +215,11 @@ Shows all active worktrees (including main if initialized) with their tmux statu
 ### Show port allocations
 
 ```bash
-workspace ports
+workspace ports              # All workspaces
+workspace ports --running    # Only workspaces with an active tmux session
 ```
 
-Shows Rails port, Vite port, and Redis DB for all workspaces.
+Shows Rails port, Vite port, and Redis DB for all workspaces. Use `--running` to limit the table to workspaces that currently have a running tmux session.
 
 ## Workspace Layout
 

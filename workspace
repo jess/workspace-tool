@@ -410,8 +410,15 @@ worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
     fi
 
-    # Create tmux session
-    local tmux_session="${project}-${feature}"
+    # Create tmux session (keyed off the directory name so it stays stable
+    # even if the branch inside the worktree later changes)
+    local session_name
+    if [[ "$is_main" == true ]]; then
+        session_name="main"
+    else
+        session_name=$(basename "$workspace_dir")
+    fi
+    local tmux_session="${project}-${session_name}"
     echo -e "${YELLOW}Creating tmux session: $tmux_session${NC}"
 
     if [[ "$is_main" == false ]]; then
@@ -628,8 +635,8 @@ worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
     fi
 
-    # Create tmux session
-    local tmux_session="${project}-${branch}"
+    # Create tmux session (keyed off the directory, not the branch)
+    local tmux_session="${project}-$(basename "$workspace_dir")"
     echo -e "${YELLOW}Creating tmux session: $tmux_session${NC}"
 
     # Create docs directory and feature notes file
@@ -809,12 +816,11 @@ cmd_resume() {
         # Check feature worktrees
         if [[ -n "$workspace_worktrees" ]]; then
             while IFS= read -r line; do
-                local path branch wt_feature
+                local path wt_feature
                 path=$(echo "$line" | awk '{print $1}')
-                branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
                 wt_feature=$(basename "$path")
 
-                local tmux_session="${project}-${branch}"
+                local tmux_session="${project}-${wt_feature}"
                 if tmux has-session -t "$tmux_session" 2>/dev/null; then
                     already_running+=("$wt_feature")
                 else
@@ -983,14 +989,17 @@ EOF
         exit 1
     fi
 
-    # Derive tmux session name from the actual branch in the worktree
-    local worktree_branch
+    # Derive tmux session name from the workspace directory, not the git branch.
+    # The directory name is stable; the branch checked out inside it can change,
+    # which would otherwise orphan the session from every lookup that rebuilds
+    # the name from the current branch.
+    local session_name
     if is_main_workspace "$feature"; then
-        worktree_branch="main"
+        session_name="main"
     else
-        worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
+        session_name=$(basename "$workspace_dir")
     fi
-    local tmux_session="${project}-${worktree_branch:-$feature}"
+    local tmux_session="${project}-${session_name}"
 
     # Check if tmux session already exists
     if tmux has-session -t "$tmux_session" 2>/dev/null; then
@@ -1133,9 +1142,9 @@ EOF
 stop_one_workspace() {
     local project="$1"
     local workspace_dir="$2"
-    local worktree_branch="$3"
+    local session_name="$3"
 
-    local tmux_session="${project}-${worktree_branch}"
+    local tmux_session="${project}-${session_name}"
     local stopped=false
 
     if [[ -S "$workspace_dir/.overmind.sock" ]]; then
@@ -1158,9 +1167,9 @@ stop_one_workspace() {
     fi
 
     if [[ "$stopped" == false ]]; then
-        echo -e "  ${BLUE}$worktree_branch${NC} — already stopped"
+        echo -e "  ${BLUE}$session_name${NC} — already stopped"
     else
-        echo -e "  ${GREEN}$worktree_branch${NC} — stopped"
+        echo -e "  ${GREEN}$session_name${NC} — stopped"
     fi
 }
 
@@ -1192,10 +1201,7 @@ cmd_stop() {
                 exit 1
             fi
 
-            local worktree_branch
-            worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
-
-            stop_one_workspace "$project" "$workspace_dir" "$worktree_branch"
+            stop_one_workspace "$project" "$workspace_dir" "$(basename "$workspace_dir")"
         fi
     else
         # Stop all workspaces for this project
@@ -1217,11 +1223,10 @@ cmd_stop() {
 
             if [[ -n "$workspace_worktrees" ]]; then
                 while IFS= read -r line; do
-                    local path branch
+                    local path
                     path=$(echo "$line" | awk '{print $1}')
-                    branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
 
-                    stop_one_workspace "$project" "$path" "$branch"
+                    stop_one_workspace "$project" "$path" "$(basename "$path")"
                 done <<< "$workspace_worktrees"
             fi
         fi
@@ -1312,9 +1317,11 @@ cmd_delete() {
     fi
 
     # Capture the actual branch name from the worktree before we remove it
+    # (needed for the branch-deletion prompt below). The tmux session, however,
+    # is keyed off the directory name, which is stable regardless of branch.
     local worktree_branch
     worktree_branch=$(git -C "$PROJECT_PATH" worktree list | awk -v dir="$workspace_dir " '$0 ~ dir {gsub(/[\[\]]/, "", $3); print $3; exit}')
-    local tmux_session="${project}-${worktree_branch}"
+    local tmux_session="${project}-$(basename "$workspace_dir")"
 
     # Prevent deleting the main directory
     if [[ "$workspace_dir" == "$PROJECT_PATH" ]]; then
@@ -1415,7 +1422,7 @@ cmd_info() {
         if [[ "$cwd" == "$real_project_path" || "$cwd" == "$real_project_path/"* ]]; then
             if [[ -f "$PROJECT_PATH/Procfile.workspace" ]]; then
                 found_project="$project"
-                found_feature=$(default_branch)
+                found_feature="main"
                 found_workspace="$PROJECT_PATH"
                 break
             fi
@@ -1431,10 +1438,8 @@ cmd_info() {
             real_wt_path=$(cd "$wt_path" 2>/dev/null && pwd -P) || continue
 
             if [[ "$cwd" == "$real_wt_path" || "$cwd" == "$real_wt_path/"* ]]; then
-                local branch
-                branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
                 found_project="$project"
-                found_feature="$branch"
+                found_feature=$(basename "$wt_path")
                 found_workspace="$wt_path"
                 break 2
             fi
@@ -1572,8 +1577,8 @@ cmd_list() {
             local feature
             feature=$(basename "$path")
 
-            # Check if tmux session exists
-            local tmux_session="${project}-${branch}"
+            # Check if tmux session exists (keyed off the directory, not the branch)
+            local tmux_session="${project}-${feature}"
             local tmux_status=""
             if tmux has-session -t "$tmux_session" 2>/dev/null; then
                 tmux_status="running"
@@ -1641,6 +1646,15 @@ cmd_list() {
 }
 
 cmd_ports() {
+    local running_only=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --running) running_only=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
     local projects
     projects=$(list_projects)
 
@@ -1654,7 +1668,8 @@ cmd_ports() {
         [[ -z "$worktrees" ]] && continue
 
         # Check main workspace
-        if [[ -f "$PROJECT_PATH/Procfile.workspace" && -f "$PROJECT_PATH/.env" ]]; then
+        if [[ -f "$PROJECT_PATH/Procfile.workspace" && -f "$PROJECT_PATH/.env" ]] && \
+           { [[ "$running_only" != true ]] || tmux has-session -t "${project}-main" 2>/dev/null; }; then
             local main_rails main_vite main_db
             main_rails=$(grep '^RAILS_PORT=' "$PROJECT_PATH/.env" | cut -d= -f2 | tr -d '"' || true)
             main_vite=$(grep '^VITE_RUBY_PORT=' "$PROJECT_PATH/.env" | cut -d= -f2 | tr -d '"' || true)
@@ -1673,9 +1688,14 @@ cmd_ports() {
         [[ -z "$workspace_worktrees" ]] && continue
 
         while IFS= read -r line; do
-            local path
+            local path feature
             path=$(echo "$line" | awk '{print $1}')
             [[ -f "$path/.env" ]] || continue
+            feature=$(basename "$path")
+
+            if [[ "$running_only" == true ]] && ! tmux has-session -t "${project}-${feature}" 2>/dev/null; then
+                continue
+            fi
 
             local rails_port vite_port db
             rails_port=$(grep '^RAILS_PORT=' "$path/.env" | cut -d= -f2 | tr -d '"' || true)
@@ -1688,15 +1708,16 @@ cmd_ports() {
 
             [[ -z "$rails_port" && -z "$vite_port" && -z "$db" ]] && continue
 
-            local feature
-            feature=$(basename "$path")
-
             rows+="$project,$feature,$rails_port,$vite_port,$db"$'\n'
         done <<< "$workspace_worktrees"
     done
 
     if [[ -z "$rows" ]]; then
-        echo "No workspaces found."
+        if [[ "$running_only" == true ]]; then
+            echo "No running workspaces found."
+        else
+            echo "No workspaces found."
+        fi
         return
     fi
 
@@ -1746,14 +1767,13 @@ cmd_resume_all() {
 
         if [[ -n "$workspace_worktrees" ]]; then
             while IFS= read -r line; do
-                local path branch
+                local path
                 path=$(echo "$line" | awk '{print $1}')
-                branch=$(echo "$line" | awk '{print $3}' | tr -d '[]')
 
                 local feature
                 feature=$(basename "$path")
 
-                local tmux_session="${project}-${branch}"
+                local tmux_session="${project}-${feature}"
                 if tmux has-session -t "$tmux_session" 2>/dev/null; then
                     already_running+=("$project/$feature")
                 else
@@ -1817,7 +1837,7 @@ usage() {
     echo "  delete <project> <feature>   Delete a workspace"
     echo "  info                         Show info about the current workspace"
     echo "  list [project] [--pr] [--running]  List workspaces (--pr for PR status, --running for active only)"
-    echo "  ports                        Show all port and Redis allocations"
+    echo "  ports [--running]            Show all port and Redis allocations (--running for active only)"
     echo ""
     echo "Examples:"
     echo "  workspace new tract main"
@@ -1874,7 +1894,7 @@ main() {
             ;;
         ports|redis)
             check_config
-            cmd_ports
+            cmd_ports "$@"
             ;;
         -h|--help|"")
             usage

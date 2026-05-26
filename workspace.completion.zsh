@@ -10,7 +10,7 @@ _workspace() {
         'delete:Delete a workspace'
         'info:Show info about the current workspace'
         'list:List all workspaces'
-        'ports:Show all port and Redis allocations'
+        'ports:Show all port and Redis allocations (--running for active only)'
     )
 
     _arguments -C \
@@ -41,6 +41,11 @@ _workspace() {
                     projects=($(awk '/^  [a-zA-Z_-]+:$/ { proj = $1; gsub(/:$/, "", proj); print proj }' "$config_file" 2>/dev/null))
                     local options=("${(@)flags}" "${(@)projects}")
                     _describe 'project or flag' options
+                    return
+                    ;;
+                ports|redis)
+                    local flags=('--running:Show only active workspaces')
+                    _describe 'flag' flags
                     return
                     ;;
             esac
