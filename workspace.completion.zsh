@@ -11,6 +11,7 @@ _workspace() {
         'info:Show info about the current workspace'
         'list:List all workspaces'
         'ports:Show all port and Redis allocations (--running for active only)'
+        'install-hooks:Install Claude Code hooks so list can show agent status'
     )
 
     _arguments -C \

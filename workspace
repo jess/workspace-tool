@@ -158,7 +158,8 @@ BANNER_SCRIPT
 
 # Find the next available Redis DB number (1-15) by scanning ALL projects' worktrees
 next_free_redis_db() {
-    local used_dbs=""
+    local used_dbs=""     # every DB claimed by any worktree (running or not)
+    local running_dbs=""  # DBs claimed by worktrees whose tmux session is live
 
     # Scan worktrees across all configured projects (they share the same Redis)
     for project in $(list_projects); do
@@ -167,18 +168,28 @@ next_free_redis_db() {
         [[ -d "$proj_path" ]] || continue
 
         while IFS= read -r line; do
-            local wt_path
+            local wt_path db session
             wt_path=$(echo "$line" | awk '{print $1}')
-            if [[ -f "$wt_path/.env" ]]; then
-                local db
-                db=$(grep '^REDIS_URL=' "$wt_path/.env" | sed 's|.*redis://[^/]*/||' | tr -d '"' || true)
-                if [[ -n "$db" ]]; then
-                    used_dbs="$used_dbs $db"
-                fi
+            [[ -f "$wt_path/.env" ]] || continue
+            db=$(grep '^REDIS_URL=' "$wt_path/.env" | sed 's|.*redis://[^/]*/||' | tr -d '"' || true)
+            [[ -n "$db" ]] || continue
+            used_dbs="$used_dbs $db"
+
+            # Match the tmux naming used at creation: "<project>-main" for the
+            # primary worktree, "<project>-<dirname>" for feature worktrees.
+            if [[ "$wt_path" == "$proj_path" ]]; then
+                session="${project}-main"
+            else
+                session="${project}-$(basename "$wt_path")"
+            fi
+            if tmux has-session -t "$session" 2>/dev/null; then
+                running_dbs="$running_dbs $db"
             fi
         done <<< "$(git -C "$proj_path" worktree list 2>/dev/null)"
     done
 
+    # Prefer a DB that no worktree has claimed at all — a clean, guaranteed
+    # collision-free slot.
     for db in $(seq 1 15); do
         if ! echo "$used_dbs" | grep -qw "$db"; then
             echo "$db"
@@ -186,8 +197,31 @@ next_free_redis_db() {
         fi
     done
 
-    echo -e "${RED}Warning: All Redis DBs (1-15) are in use${NC}" >&2
-    echo "1"
+    # Pool exhausted: every DB is claimed by some (often idle) worktree. Rather
+    # than always recycling DB 1, pick the DB least likely to collide with
+    # active work: avoid DBs used by running workspaces, then break ties toward
+    # the least-crowded DB so repeated allocations spread out instead of piling
+    # onto one number.
+    local best_db="" best_score=""
+    for db in $(seq 1 15); do
+        local running_count total_count score
+        running_count=$(echo "$running_dbs" | grep -ow "$db" | wc -l | tr -d ' ')
+        total_count=$(echo "$used_dbs" | grep -ow "$db" | wc -l | tr -d ' ')
+        # Weight running collisions heavily so any DB free of running work wins
+        # over any DB that's in active use.
+        score=$((running_count * 100 + total_count))
+        if [[ -z "$best_score" || "$score" -lt "$best_score" ]]; then
+            best_score="$score"
+            best_db="$db"
+        fi
+    done
+
+    if [[ "$best_score" -ge 100 ]]; then
+        echo -e "${YELLOW}Warning: all Redis DBs (1-15) are in use by running workspaces; reusing DB $best_db${NC}" >&2
+    else
+        echo -e "${YELLOW}Note: all Redis DBs (1-15) are assigned; reusing DB $best_db (not used by any running workspace)${NC}" >&2
+    fi
+    echo "$best_db"
 }
 
 # Find an unused port by scanning ALL projects' worktrees for RAILS_PORT and VITE_RUBY_PORT
@@ -1334,7 +1368,20 @@ cmd_delete() {
     echo -e "  Directory: $workspace_dir"
     echo ""
 
-    # Stop overmind before killing tmux (overmind runs inside tmux)
+    # Confirm deletion BEFORE tearing anything down, so cancelling is a true
+    # no-op. Teardown (overmind, then tmux) is deferred until after this point —
+    # and the tmux kill is saved for the very end, because deleting the session
+    # this command was launched from would kill the script mid-run otherwise.
+    if [[ "$force" != true ]]; then
+        read -p "Delete worktree at $workspace_dir? [y/N] " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Cancelled."
+            exit 0
+        fi
+    fi
+
+    # Stop overmind before removing the worktree (its socket lives inside it)
     if [[ -S "$workspace_dir/.overmind.sock" ]]; then
         echo -e "${YELLOW}Stopping overmind...${NC}"
         (cd "$workspace_dir" && overmind quit 2>/dev/null) || true
@@ -1346,28 +1393,21 @@ cmd_delete() {
         rm -f "$workspace_dir/.overmind.sock"
     fi
 
-    # Kill tmux session if it exists
-    if tmux has-session -t "$tmux_session" 2>/dev/null; then
-        echo -e "${YELLOW}Killing tmux session: $tmux_session${NC}"
-        tmux kill-session -t "$tmux_session"
-    fi
-
-    # Confirm deletion
-    if [[ "$force" != true ]]; then
-        read -p "Delete worktree at $workspace_dir? [y/N] " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            echo "Cancelled."
-            exit 0
-        fi
-    fi
-
     # Remove the worktree
     echo -e "${YELLOW}Removing git worktree...${NC}"
     cd "$PROJECT_PATH"
     if ! git worktree remove "$workspace_dir" --force 2>/dev/null; then
         echo -e "${YELLOW}Worktree has untracked files, cleaning up manually...${NC}"
-        rm -rf "$workspace_dir"
+        # Retry: macOS Finder/Spotlight can recreate .DS_Store mid-delete,
+        # leaving an otherwise-empty dir and an ENOTEMPTY failure behind.
+        # The `&& break` keeps a failing rm from tripping `set -e`.
+        for _ in 1 2 3; do
+            rm -rf "$workspace_dir" && break
+            sleep 0.2
+        done
+        if [[ -d "$workspace_dir" ]]; then
+            echo -e "${RED}Warning: could not fully remove $workspace_dir${NC}"
+        fi
         git worktree prune
     fi
 
@@ -1398,6 +1438,15 @@ cmd_delete() {
 
     echo ""
     echo -e "${GREEN}Workspace deleted successfully!${NC}"
+
+    # Kill the tmux session LAST. If this command was launched from inside that
+    # session, this destroys our own pane — so all the real work above must be
+    # finished by now. The success message prints first because we may not
+    # survive past this point to print anything after it.
+    if tmux has-session -t "$tmux_session" 2>/dev/null; then
+        echo -e "${YELLOW}Killing tmux session: $tmux_session${NC}"
+        tmux kill-session -t "$tmux_session"
+    fi
 }
 
 # ============================================================================
@@ -1501,6 +1550,23 @@ cmd_info() {
 # Subcommand: list
 # ============================================================================
 
+# Emit a normalized agent-status token for a tmux session, or "~" (blank) when
+# there is nothing to report. The status glyph lives in the session's
+# @agent_status user option, set by the Claude Code hooks that `workspace
+# install-hooks` installs. The same option feeds the tmux session chooser.
+agent_status_token() {
+    local tmux_session="$1"
+
+    tmux has-session -t "$tmux_session" 2>/dev/null || { echo "~"; return; }
+
+    case "$(tmux show-options -t "$tmux_session" -v @agent_status 2>/dev/null)" in
+        ●) echo "working" ;;
+        ▲) echo "needs-you" ;;
+        ○) echo "idle" ;;
+        *) echo "~" ;;
+    esac
+}
+
 cmd_list() {
     local filter_project=""
     local show_pr=false
@@ -1557,12 +1623,14 @@ cmd_list() {
                 main_tmux_status="running"
             fi
             local main_tmux_display="${main_tmux_status:-~}"
+            local main_status
+            main_status=$(agent_status_token "$main_tmux")
             if [[ "$running_only" == true && -z "$main_tmux_status" ]]; then
                 : # skip non-running workspace
             elif [[ "$show_pr" == true ]]; then
-                rows+="$project,main,$main_branch,$main_tmux_display,~"$'\n'
+                rows+="$project,main,$main_branch,$main_tmux_display,~,$main_status"$'\n'
             else
-                rows+="$project,main,$main_branch,$main_tmux_display"$'\n'
+                rows+="$project,main,$main_branch,$main_tmux_display,$main_status"$'\n'
             fi
         fi
 
@@ -1605,13 +1673,15 @@ cmd_list() {
 
             # Pad tmux/pr values so column alignment uses consistent width
             local tmux_display="${tmux_status:-~}"
+            local status_token
+            status_token=$(agent_status_token "$tmux_session")
             if [[ "$running_only" == true && -z "$tmux_status" ]]; then
                 continue
             elif [[ "$show_pr" == true ]]; then
                 local pr_display="${pr_status:-~}"
-                rows+="$project,$feature,$branch,$tmux_display,$pr_display"$'\n'
+                rows+="$project,$feature,$branch,$tmux_display,$pr_display,$status_token"$'\n'
             else
-                rows+="$project,$feature,$branch,$tmux_display"$'\n'
+                rows+="$project,$feature,$branch,$tmux_display,$status_token"$'\n'
             fi
         done <<< "$workspace_worktrees"
     done
@@ -1630,6 +1700,7 @@ cmd_list() {
     if [[ "$show_pr" == true ]]; then
         header="$header,PR"
     fi
+    header="$header,Status"
     table=$(printf "%s\n%s" "$header" "$rows" | column -t -s,)
     header_line=$(echo "$table" | head -1)
     max_width=$(echo "$table" | awk '{ if (length > max) max = length } END { print max }')
@@ -1638,6 +1709,12 @@ cmd_list() {
     # Replace placeholders and render table
     local body
     body=$(echo "$table" | tail -n +2 | sed 's/~/ /g')
+    # Expand the Status token (always the last column) into a glyph + label.
+    # Anchored to end-of-line so it can never collide with a branch/feature name.
+    body=$(echo "$body" \
+        | sed -E 's/needs-you[[:space:]]*$/▲ needs you/' \
+        | sed -E 's/working[[:space:]]*$/● working/' \
+        | sed -E 's/idle[[:space:]]*$/○ idle/')
     table=$(printf "%s\n%s\n%s" "$header_line" "$separator" "$body")
     echo "$table" | gum style \
         --border rounded \
@@ -1823,6 +1900,77 @@ cmd_resume_all() {
 # Main
 # ============================================================================
 
+# The tmux choose-tree line format that surfaces @agent_status in the session
+# chooser (prefix + s). Prepends the status glyph to the default-ish line.
+readonly TMUX_CHOOSER_FORMAT='#{?#{@agent_status},#{@agent_status} ,}#{session_name}: #{session_windows} windows#{?session_attached, (attached),}'
+
+# Install Claude Code hooks into ~/.claude/settings.json so that every claude
+# session records its current state in its tmux session's @agent_status option.
+# That option feeds both the tmux session chooser and `workspace list`.
+# Idempotent: re-running replaces our own entries and leaves other hooks intact.
+cmd_install_hooks() {
+    local settings="$HOME/.claude/settings.json"
+
+    if ! command -v jq &>/dev/null; then
+        echo -e "${RED}jq is required to install hooks.${NC} Install it with: brew install jq"
+        exit 1
+    fi
+
+    mkdir -p "$HOME/.claude"
+    [[ -f "$settings" ]] || echo '{}' > "$settings"
+
+    if ! jq empty "$settings" 2>/dev/null; then
+        echo -e "${RED}$settings is not valid JSON; refusing to modify it.${NC}"
+        exit 1
+    fi
+
+    # Each hook sets the status glyph on its own tmux session (found via the
+    # inherited $TMUX_PANE), so nothing happens when claude runs outside tmux.
+    # The trailing comment tags our commands so re-installs can find/replace them.
+    local pre='[ -n "$TMUX_PANE" ] && tmux set-option -t "$TMUX_PANE" @agent_status "'
+    local suf='" 2>/dev/null # workspace-tool-agent-state'
+
+    local tmp
+    tmp=$(mktemp)
+    if jq \
+        --arg working "${pre}●${suf}" \
+        --arg needs   "${pre}▲${suf}" \
+        --arg idle    "${pre}○${suf}" \
+        --arg clear   "${pre}${suf}" \
+        '
+        def group(cmd): { hooks: [ { type: "command", command: cmd } ] };
+        def mine: ([.hooks[]?.command // ""] | any(test("workspace-tool-agent-state")));
+        .hooks //= {}
+        | .hooks |= with_entries(.value |= map(select(mine | not)))
+        | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [group($working)])
+        | .hooks.PostToolUse      = ((.hooks.PostToolUse      // []) + [group($working)])
+        | .hooks.Notification     = ((.hooks.Notification     // []) + [group($needs)])
+        | .hooks.Stop             = ((.hooks.Stop             // []) + [group($needs)])
+        | .hooks.SessionStart     = ((.hooks.SessionStart     // []) + [group($idle)])
+        | .hooks.SessionEnd       = ((.hooks.SessionEnd       // []) + [group($clear)])
+        ' "$settings" > "$tmp" && [[ -s "$tmp" ]]; then
+        mv "$tmp" "$settings"
+    else
+        rm -f "$tmp"
+        echo -e "${RED}Failed to update $settings${NC}"
+        exit 1
+    fi
+
+    echo -e "${GREEN}Installed agent-status hooks in $settings${NC}"
+    echo ""
+    echo "  ● working    a prompt is being worked on"
+    echo "  ▲ needs you  waiting on permission, or the turn just finished"
+    echo "  ○ idle       session started, nothing in flight"
+    echo ""
+    echo "Status now shows in 'workspace list'. To also show it in the tmux"
+    echo "session chooser (prefix + s), add this to your ~/.tmux.conf:"
+    echo ""
+    echo -e "  ${BLUE}bind s choose-tree -Zs -F \"$TMUX_CHOOSER_FORMAT\"${NC}"
+    echo ""
+    echo -e "${YELLOW}Only claude sessions started from now on will report status.${NC}"
+    echo "Restart claude in any running workspace to pick it up."
+}
+
 usage() {
     echo "Usage: workspace <command> [args]"
     echo ""
@@ -1838,6 +1986,7 @@ usage() {
     echo "  info                         Show info about the current workspace"
     echo "  list [project] [--pr] [--running]  List workspaces (--pr for PR status, --running for active only)"
     echo "  ports [--running]            Show all port and Redis allocations (--running for active only)"
+    echo "  install-hooks                Install Claude Code hooks so 'list' can show agent status"
     echo ""
     echo "Examples:"
     echo "  workspace new tract main"
@@ -1895,6 +2044,9 @@ main() {
         ports|redis)
             check_config
             cmd_ports "$@"
+            ;;
+        install-hooks)
+            cmd_install_hooks
             ;;
         -h|--help|"")
             usage

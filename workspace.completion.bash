@@ -2,7 +2,7 @@ _workspace_completions() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="new pull resume stop delete info list ports"
+    local commands="new pull resume stop delete info list ports install-hooks"
     local config_file="$HOME/.workspaces.yml"
 
     # Complete subcommand

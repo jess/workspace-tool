@@ -20,6 +20,7 @@ Opinionated? Absolutely. It assumes you're running Rails, tmux, overmind, and vi
 - Claude Code session consolidation on workspace deletion
 - Shell completions for bash and zsh
 - PR status display in workspace list (via GitHub CLI)
+- Agent status column in `list` — see at a glance which workspace's Claude session needs you
 
 ## Assumptions
 
@@ -57,11 +58,12 @@ Each workspace gets its own Redis DB number (1-15) to avoid data conflicts. The 
 - overmind
 - gum (for styled output)
 - gh (optional, for PR status in `list` and PR descriptions in `pull`)
+- jq (optional, for `install-hooks` — the agent status column)
 
 ### macOS
 
 ```bash
-brew install tmux overmind gum gh
+brew install tmux overmind gum gh jq
 ```
 
 ## Installation
@@ -210,7 +212,53 @@ workspace list --pr         # Include PR status (slower, queries GitHub)
 workspace list myapp --pr   # Specific project with PR status
 ```
 
-Shows all active worktrees (including main if initialized) with their tmux status. Use `--pr` to include PR status (open/merged/closed) via GitHub CLI.
+Shows all active worktrees (including main if initialized) with their tmux status. Use `--pr` to include PR status (open/merged/closed) via GitHub CLI. The **Status** column reports the state of each workspace's Claude Code session (see below).
+
+### Agent status
+
+Each workspace's Claude Code session reports what it's doing, so you can glance across your workspaces and see which one is waiting on you. The status shows up in two places.
+
+**In the tmux session chooser** (`prefix + s`) — usually where you decide what to jump into next:
+
+```
+(0) + ● tract-main: 2 windows
+(1) + ▲ epub-appraisal: 2 windows (attached)
+(2) + ○ epub-support-plan: 2 windows
+```
+
+**In `workspace list`**, as a Status column:
+
+```
+Project  Workspace   Branch     Tmux     Status
+------------------------------------------------
+myapp    main        main       running  ● working
+myapp    checkout    checkout   running  ▲ needs you
+myapp    search      search-ui  running  ○ idle
+myapp    invoices    invoices   ~
+```
+
+- **● working** — a prompt is being worked on
+- **▲ needs you** — blocked on a permission prompt, or the turn just finished
+- **○ idle** — session started, nothing in flight
+- *(blank)* — no live session, or no Claude session reporting
+
+#### How it works
+
+Install the hooks once (requires `jq`):
+
+```bash
+workspace install-hooks
+```
+
+This merges a small set of hooks into `~/.claude/settings.json` — non-destructively (existing hooks are preserved) and idempotently (re-running won't duplicate). Each Claude session then records its state in its tmux session's `@agent_status` user option. Nothing is written to disk, and nothing happens when `claude` runs outside tmux.
+
+`workspace list` reads that option automatically. To also show it in the tmux session chooser, add the binding `install-hooks` prints to your `~/.tmux.conf`:
+
+```tmux
+bind s choose-tree -Zs -F "#{?#{@agent_status},#{@agent_status} ,}#{session_name}: #{session_windows} windows#{?session_attached, (attached),}"
+```
+
+Only sessions **started after** installing the hooks report status — restart `claude` in any already-running workspace to pick it up.
 
 ### Show port allocations
 
