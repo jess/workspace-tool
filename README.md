@@ -185,13 +185,16 @@ workspace delete myapp my-feature --force  # Skip confirmations
 ```
 
 This will:
-1. Stop overmind
-2. Kill the tmux session
-3. Confirm, then remove the git worktree
-4. Move any Claude Code sessions to the main project (so they appear in `claude resume`)
-5. Confirm, then optionally delete the branch
+1. If `docs/local` holds untracked files, offer to copy them to `docs/local/rescued-<feature>/` in the main worktree, skip, or abort before anything is torn down
+2. Stop overmind
+3. Kill the tmux session
+4. Confirm, then remove the git worktree
+5. Move any Claude Code sessions to the main project (so they appear in `claude resume`)
+6. Confirm, then optionally delete the branch
 
-Use `--force` to skip both confirmations (auto-deletes the branch too). The main workspace cannot be deleted.
+Because `docs/local` is gitignored, real files there would be lost with the worktree. The rescue prompt copies only real files (symlinks inside `docs/local` point to shared locations that survive deletion, so they're left alone) and defaults to **abort**, so a stray keypress never deletes anything.
+
+Use `--force` to skip the confirmations (auto-deletes the branch too, and auto-rescues any `docs/local` files since copying is non-destructive). The main workspace cannot be deleted.
 
 ### Archive and resume a workspace
 

@@ -1368,6 +1368,54 @@ cmd_delete() {
     echo -e "  Directory: $workspace_dir"
     echo ""
 
+    # Rescue untracked files from docs/local before anything is torn down.
+    # docs/local is gitignored, so real files living in it would vanish with the
+    # worktree. Symlinks inside docs/local point to shared locations outside the
+    # worktree, so their targets survive deletion — nothing to rescue there.
+    # `find -type f` (no -L) is exactly the set at risk: it reports symlinks as
+    # -type l and won't descend into symlinked directories, so only real files
+    # are counted and copied.
+    local docs_local="$workspace_dir/docs/local"
+    if [[ -d "$docs_local" ]]; then
+        local risked_count
+        risked_count=$(cd "$docs_local" && find . -type f 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$risked_count" -gt 0 ]]; then
+            echo -e "${BLUE}docs/local has $risked_count untracked file(s) that would be lost:${NC}"
+            (cd "$docs_local" && find . -type f 2>/dev/null | sed 's|^\./|  |')
+            echo ""
+
+            local rescue_choice
+            if [[ "$force" == true ]]; then
+                # No human to ask; copying is non-destructive, so always rescue.
+                rescue_choice="c"
+            else
+                read -p "[C]opy to main docs/local and continue / [S]kip and delete anyway / [A]bort? [c/s/A] " -n 1 -r rescue_choice
+                echo
+            fi
+
+            case "$rescue_choice" in
+                [Cc])
+                    local rescue_dst="$PROJECT_PATH/docs/local/rescued-$feature"
+                    echo -e "${YELLOW}Copying docs/local files to $rescue_dst${NC}"
+                    mkdir -p "$rescue_dst"
+                    (cd "$docs_local" && find . -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
+                        mkdir -p "$rescue_dst/$(dirname "$f")"
+                        cp -p "$f" "$rescue_dst/$f"
+                    done)
+                    echo -e "${GREEN}Rescued $risked_count file(s) to $rescue_dst${NC}"
+                    ;;
+                [Ss])
+                    echo -e "${YELLOW}Skipping rescue — docs/local files will be deleted.${NC}"
+                    ;;
+                *)
+                    echo "Aborted. Nothing was deleted."
+                    exit 0
+                    ;;
+            esac
+            echo ""
+        fi
+    fi
+
     # Confirm deletion BEFORE tearing anything down, so cancelling is a true
     # no-op. Teardown (overmind, then tmux) is deferred until after this point —
     # and the tmux kill is saved for the very end, because deleting the session
