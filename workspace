@@ -114,6 +114,37 @@ sanitize_dir_name() {
     echo "${1//\//-}"
 }
 
+# Feature scratchpad lives under docs/local (gitignored) so it never
+# overwrites committed docs in docs/<feature>.md.
+scratchpad_path() {
+    local workspace_dir="$1"
+    local feature="$2"
+    echo "$workspace_dir/docs/local/$(sanitize_dir_name "$feature").md"
+}
+
+# Prefer docs/local; fall back to legacy docs/<feature>.md from older workspaces.
+resolve_scratchpad() {
+    local workspace_dir="$1"
+    local feature="$2"
+    local preferred legacy
+    preferred=$(scratchpad_path "$workspace_dir" "$feature")
+    if [[ -f "$preferred" ]]; then
+        echo "$preferred"
+        return
+    fi
+    legacy="$workspace_dir/docs/$(sanitize_dir_name "$feature").md"
+    if [[ -f "$legacy" ]]; then
+        echo "$legacy"
+        return
+    fi
+    # Nested legacy path for branch names that contained '/'
+    if [[ "$feature" == */* && -f "$workspace_dir/docs/$feature.md" ]]; then
+        echo "$workspace_dir/docs/$feature.md"
+        return
+    fi
+    echo "$preferred"
+}
+
 # Check if the feature name refers to the main/master workspace
 is_main_workspace() {
     local feature="$1"
@@ -455,10 +486,13 @@ EOF
     local tmux_session="${project}-${session_name}"
     echo -e "${YELLOW}Creating tmux session: $tmux_session${NC}"
 
+    local notes_file=""
     if [[ "$is_main" == false ]]; then
-        # Create docs directory and feature notes file
-        mkdir -p "$workspace_dir/docs"
-        cat > "$workspace_dir/docs/$feature.md" << EOF
+        # Create feature scratchpad under docs/local (gitignored)
+        notes_file=$(scratchpad_path "$workspace_dir" "$feature")
+        mkdir -p "$(dirname "$notes_file")"
+        if [[ ! -f "$notes_file" ]]; then
+            cat > "$notes_file" << EOF
 # New Feature - $feature
 
 ---
@@ -469,6 +503,7 @@ Path:        $workspace_dir
 
 Start describing your new feature...
 EOF
+        fi
     fi
 
     # Create tmux session with first window for coding
@@ -476,7 +511,7 @@ EOF
 
     # Split first window vertically: vim on left, shell on right
     if [[ "$is_main" == false ]]; then
-        tmux send-keys -t "$tmux_session:code" "vim docs/$feature.md" C-m
+        tmux send-keys -t "$tmux_session:code" "vim \"$notes_file\"" C-m
     else
         tmux send-keys -t "$tmux_session:code" "vim" C-m
     fi
@@ -673,8 +708,9 @@ EOF
     local tmux_session="${project}-$(basename "$workspace_dir")"
     echo -e "${YELLOW}Creating tmux session: $tmux_session${NC}"
 
-    # Create docs directory and feature notes file
-    local notes_file="$workspace_dir/docs/$branch.md"
+    # Create feature scratchpad under docs/local (gitignored)
+    local notes_file
+    notes_file=$(scratchpad_path "$workspace_dir" "$branch")
     mkdir -p "$(dirname "$notes_file")"
 
     # Try to fetch PR description from GitHub
@@ -690,9 +726,10 @@ EOF
         pr_description=$(gh pr view "$branch" --repo "$(git -C "$PROJECT_PATH" remote get-url origin)" --json body --jq '.body' 2>/dev/null || true)
     fi
 
-    if [[ -n "$pr_title" ]]; then
-        echo -e "  Found PR: ${CYAN}$pr_title${NC}"
-        cat > "$notes_file" << EOF
+    if [[ ! -f "$notes_file" ]]; then
+        if [[ -n "$pr_title" ]]; then
+            echo -e "  Found PR: ${CYAN}$pr_title${NC}"
+            cat > "$notes_file" << EOF
 # $pr_title
 
 ---
@@ -706,9 +743,9 @@ PR:          $pr_url
 
 $pr_description
 EOF
-    else
-        echo -e "  ${YELLOW}No PR found for branch, creating basic notes file${NC}"
-        cat > "$notes_file" << EOF
+        else
+            echo -e "  ${YELLOW}No PR found for branch, creating basic notes file${NC}"
+            cat > "$notes_file" << EOF
 # $branch
 
 ---
@@ -719,6 +756,9 @@ Path:        $workspace_dir
 
 No PR found for this branch.
 EOF
+        fi
+    elif [[ -n "$pr_title" ]]; then
+        echo -e "  Found PR: ${CYAN}$pr_title${NC} (scratchpad already exists, leaving it alone)"
     fi
 
     # Create tmux session with first window for coding
@@ -1000,10 +1040,12 @@ worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
         fi
 
-        # Create docs directory and feature notes file
-        mkdir -p "$workspace_dir/docs"
-        if [[ ! -f "$workspace_dir/docs/$feature.md" ]]; then
-            cat > "$workspace_dir/docs/$feature.md" << EOF
+        # Create feature scratchpad under docs/local (gitignored)
+        local notes_file
+        notes_file=$(scratchpad_path "$workspace_dir" "$feature")
+        mkdir -p "$(dirname "$notes_file")"
+        if [[ ! -f "$notes_file" ]]; then
+            cat > "$notes_file" << EOF
 # $feature
 
 ---
@@ -1081,10 +1123,11 @@ EOF
     # Create tmux session with first window for coding
     tmux new-session -d -s "$tmux_session" -c "$workspace_dir" -n "code"
 
-    # Open the feature's own docs file if it exists
+    # Open the feature scratchpad if it exists (docs/local, or legacy docs/)
     local docs_file=""
-    if [[ -f "$workspace_dir/docs/$feature.md" ]]; then
-        docs_file="$workspace_dir/docs/$feature.md"
+    if ! is_main_workspace "$feature"; then
+        docs_file=$(resolve_scratchpad "$workspace_dir" "$feature")
+        [[ -f "$docs_file" ]] || docs_file=""
     fi
 
     if [[ -n "$docs_file" ]]; then
@@ -1712,8 +1755,9 @@ cmd_list() {
                     CLOSED) pr_status="closed" ;;
                 esac
 
-                # Add PR URL to docs file if missing
-                local docs_file="$path/docs/${feature}.md"
+                # Add PR URL to scratchpad if missing
+                local docs_file
+                docs_file=$(resolve_scratchpad "$path" "$feature")
                 if [[ -n "$pr_url" && -f "$docs_file" ]] && ! grep -q "^PR:" "$docs_file"; then
                     sed -i '' "/^Path:/s|$|\nPR:          $pr_url|" "$docs_file"
                 fi

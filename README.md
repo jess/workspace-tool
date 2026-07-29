@@ -138,9 +138,9 @@ This will:
 2. Create a git worktree at `~/projects/myapp/my-feature` with a new branch
 3. Copy `.env` from the main project and add workspace-specific settings (ports, session cookie, Redis DB)
 4. Create a tmux session `myapp-my-feature` with:
-   - `code` window: vim (with `docs/my-feature.md` open) + shell
+   - `code` window: vim (with `docs/local/my-feature.md` open) + shell
    - `server` window: runs nvm use, bundle install, yarn install, then overmind
-5. Generate `docs/my-feature.md` with workspace details
+5. Generate `docs/local/my-feature.md` with workspace details
 
 ### Create a workspace from an existing branch
 
@@ -156,7 +156,7 @@ Like `new`, but instead of creating a new branch from the default branch, it cre
 workspace pull myapp remote-branch
 ```
 
-Like `new`, but checks out an existing remote branch instead of creating one. If a PR exists for the branch, its title and description are included in the docs file.
+Like `new`, but checks out an existing remote branch instead of creating one. If a PR exists for the branch, its title and description are included in the scratchpad.
 
 ### Resume a workspace
 
@@ -282,14 +282,17 @@ Each workspace gets:
 ├── .env.test                 # Forces Vite to compile in test env
 ├── Procfile.workspace        # Copied from project or generated from default
 └── docs/
-    └── my-feature.md         # Feature scratchpad
+    └── local/
+        └── my-feature.md     # Feature scratchpad (gitignored)
 ```
 
-### Feature scratchpad (`docs/<feature>.md`)
+### Feature scratchpad (`docs/local/<feature>.md`)
 
-Each feature workspace gets a notes file that opens in vim when the workspace starts. Use it as a scratchpad for AI-assisted development: add context about what you're building, questions, tasks, reminders, and decisions made along the way. Point Claude at it so it has context for your feature.
+Each feature workspace gets a notes file under `docs/local/` that opens in vim when the workspace starts. That directory is gitignored, so the scratchpad never overwrites committed docs in `docs/` and won't be committed by accident.
 
-When the feature is complete, ask Claude to convert the scratchpad into documentation that can serve as memory/context for future changes or as a reference if you need a reminder of how something works.
+Use it as a scratchpad for AI-assisted development: add context about what you're building, questions, tasks, reminders, and decisions made along the way. Point Claude at it so it has context for your feature.
+
+When the feature is complete, ask Claude to convert the scratchpad into real documentation under `docs/` that can serve as memory/context for future changes or as a reference if you need a reminder of how something works.
 
 ## Environment Variables
 
