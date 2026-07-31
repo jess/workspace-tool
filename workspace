@@ -114,15 +114,16 @@ sanitize_dir_name() {
     echo "${1//\//-}"
 }
 
-# Feature scratchpad lives under docs/local (gitignored) so it never
-# overwrites committed docs in docs/<feature>.md.
+# Feature scratchpad lives under tmp/ so it never overwrites committed docs
+# and the delete-time docs/local rescue doesn't prompt over throwaway notes.
 scratchpad_path() {
     local workspace_dir="$1"
     local feature="$2"
-    echo "$workspace_dir/docs/local/$(sanitize_dir_name "$feature").md"
+    echo "$workspace_dir/tmp/$(sanitize_dir_name "$feature").md"
 }
 
-# Prefer docs/local; fall back to legacy docs/<feature>.md from older workspaces.
+# Prefer tmp/; fall back to legacy docs/local/<feature>.md and docs/<feature>.md
+# from older workspaces.
 resolve_scratchpad() {
     local workspace_dir="$1"
     local feature="$2"
@@ -130,6 +131,11 @@ resolve_scratchpad() {
     preferred=$(scratchpad_path "$workspace_dir" "$feature")
     if [[ -f "$preferred" ]]; then
         echo "$preferred"
+        return
+    fi
+    legacy="$workspace_dir/docs/local/$(sanitize_dir_name "$feature").md"
+    if [[ -f "$legacy" ]]; then
+        echo "$legacy"
         return
     fi
     legacy="$workspace_dir/docs/$(sanitize_dir_name "$feature").md"
@@ -488,7 +494,7 @@ EOF
 
     local notes_file=""
     if [[ "$is_main" == false ]]; then
-        # Create feature scratchpad under docs/local (gitignored)
+        # Create feature scratchpad under tmp/
         notes_file=$(scratchpad_path "$workspace_dir" "$feature")
         mkdir -p "$(dirname "$notes_file")"
         if [[ ! -f "$notes_file" ]]; then
@@ -708,7 +714,7 @@ EOF
     local tmux_session="${project}-$(basename "$workspace_dir")"
     echo -e "${YELLOW}Creating tmux session: $tmux_session${NC}"
 
-    # Create feature scratchpad under docs/local (gitignored)
+    # Create feature scratchpad under tmp/
     local notes_file
     notes_file=$(scratchpad_path "$workspace_dir" "$branch")
     mkdir -p "$(dirname "$notes_file")"
@@ -1040,7 +1046,7 @@ worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
         fi
 
-        # Create feature scratchpad under docs/local (gitignored)
+        # Create feature scratchpad under tmp/
         local notes_file
         notes_file=$(scratchpad_path "$workspace_dir" "$feature")
         mkdir -p "$(dirname "$notes_file")"
@@ -1123,7 +1129,7 @@ EOF
     # Create tmux session with first window for coding
     tmux new-session -d -s "$tmux_session" -c "$workspace_dir" -n "code"
 
-    # Open the feature scratchpad if it exists (docs/local, or legacy docs/)
+    # Open the feature scratchpad if it exists (tmp/, or legacy docs/local, docs/)
     local docs_file=""
     if ! is_main_workspace "$feature"; then
         docs_file=$(resolve_scratchpad "$workspace_dir" "$feature")
@@ -1417,14 +1423,16 @@ cmd_delete() {
     # worktree, so their targets survive deletion — nothing to rescue there.
     # `find -type f` (no -L) is exactly the set at risk: it reports symlinks as
     # -type l and won't descend into symlinked directories, so only real files
-    # are counted and copied.
+    # are counted and copied. The feature scratchpad is throwaway by design
+    # (older workspaces kept it here before it moved to tmp/), so it's excluded.
     local docs_local="$workspace_dir/docs/local"
+    local legacy_scratchpad="./$(sanitize_dir_name "$feature").md"
     if [[ -d "$docs_local" ]]; then
         local risked_count
-        risked_count=$(cd "$docs_local" && find . -type f 2>/dev/null | wc -l | tr -d ' ')
+        risked_count=$(cd "$docs_local" && find . -type f ! -path "$legacy_scratchpad" 2>/dev/null | wc -l | tr -d ' ')
         if [[ "$risked_count" -gt 0 ]]; then
             echo -e "${BLUE}docs/local has $risked_count untracked file(s) that would be lost:${NC}"
-            (cd "$docs_local" && find . -type f 2>/dev/null | sed 's|^\./|  |')
+            (cd "$docs_local" && find . -type f ! -path "$legacy_scratchpad" 2>/dev/null | sed 's|^\./|  |')
             echo ""
 
             local rescue_choice
@@ -1441,7 +1449,7 @@ cmd_delete() {
                     local rescue_dst="$PROJECT_PATH/docs/local/rescued-$feature"
                     echo -e "${YELLOW}Copying docs/local files to $rescue_dst${NC}"
                     mkdir -p "$rescue_dst"
-                    (cd "$docs_local" && find . -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
+                    (cd "$docs_local" && find . -type f ! -path "$legacy_scratchpad" -print0 2>/dev/null | while IFS= read -r -d '' f; do
                         mkdir -p "$rescue_dst/$(dirname "$f")"
                         cp -p "$f" "$rescue_dst/$f"
                     done)

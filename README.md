@@ -138,9 +138,9 @@ This will:
 2. Create a git worktree at `~/projects/myapp/my-feature` with a new branch
 3. Copy `.env` from the main project and add workspace-specific settings (ports, session cookie, Redis DB)
 4. Create a tmux session `myapp-my-feature` with:
-   - `code` window: vim (with `docs/local/my-feature.md` open) + shell
+   - `code` window: vim (with `tmp/my-feature.md` open) + shell
    - `server` window: runs nvm use, bundle install, yarn install, then overmind
-5. Generate `docs/local/my-feature.md` with workspace details
+5. Generate `tmp/my-feature.md` with workspace details
 
 ### Create a workspace from an existing branch
 
@@ -192,7 +192,7 @@ This will:
 5. Move any Claude Code sessions to the main project (so they appear in `claude resume`)
 6. Confirm, then optionally delete the branch
 
-Because `docs/local` is gitignored, real files there would be lost with the worktree. The rescue prompt copies only real files (symlinks inside `docs/local` point to shared locations that survive deletion, so they're left alone) and defaults to **abort**, so a stray keypress never deletes anything.
+Because `docs/local` is gitignored, real files there would be lost with the worktree. The rescue prompt copies only real files (symlinks inside `docs/local` point to shared locations that survive deletion, so they're left alone) and defaults to **abort**, so a stray keypress never deletes anything. The feature scratchpad is excluded — it's throwaway by design and deleted with the worktree without prompting (this also covers older workspaces that kept it in `docs/local`).
 
 Use `--force` to skip the confirmations (auto-deletes the branch too, and auto-rescues any `docs/local` files since copying is non-destructive). The main workspace cannot be deleted.
 
@@ -281,14 +281,13 @@ Each workspace gets:
 ├── .env                      # Copied from main + workspace settings
 ├── .env.test                 # Forces Vite to compile in test env
 ├── Procfile.workspace        # Copied from project or generated from default
-└── docs/
-    └── local/
-        └── my-feature.md     # Feature scratchpad (gitignored)
+└── tmp/
+    └── my-feature.md         # Feature scratchpad (throwaway)
 ```
 
-### Feature scratchpad (`docs/local/<feature>.md`)
+### Feature scratchpad (`tmp/<feature>.md`)
 
-Each feature workspace gets a notes file under `docs/local/` that opens in vim when the workspace starts. That directory is gitignored, so the scratchpad never overwrites committed docs in `docs/` and won't be committed by accident.
+Each feature workspace gets a notes file under `tmp/` that opens in vim when the workspace starts. Living in `tmp/` keeps it out of git, away from committed docs in `docs/`, and out of the delete-time `docs/local` rescue prompt — it's torn down with the worktree, no questions asked. Older workspaces that still have a scratchpad in `docs/local/` (or `docs/`) keep working; the existing file is found and opened there.
 
 Use it as a scratchpad for AI-assisted development: add context about what you're building, questions, tasks, reminders, and decisions made along the way. Point Claude at it so it has context for your feature.
 
