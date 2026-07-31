@@ -20,7 +20,7 @@ _workspace_completions() {
         if [[ "$command" == "resume" ]]; then
             COMPREPLY=($(compgen -W "--all $projects" -- "$cur"))
         elif [[ "$command" == "list" ]]; then
-            COMPREPLY=($(compgen -W "--pr --running $projects" -- "$cur"))
+            COMPREPLY=($(compgen -W "--pr --running --recent $projects" -- "$cur"))
         elif [[ "$command" == "ports" || "$command" == "redis" ]]; then
             COMPREPLY=($(compgen -W "--running" -- "$cur"))
         else
@@ -37,7 +37,7 @@ _workspace_completions() {
 
     # Complete additional flags for list at any position
     if [[ "$command" == "list" && "$cur" == --* ]]; then
-        COMPREPLY=($(compgen -W "--pr --running" -- "$cur"))
+        COMPREPLY=($(compgen -W "--pr --running --recent" -- "$cur"))
         return
     fi
 

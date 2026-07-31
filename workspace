@@ -122,6 +122,12 @@ scratchpad_path() {
     echo "$workspace_dir/tmp/$(sanitize_dir_name "$feature").md"
 }
 
+# Standard notice embedded in every scratchpad stub so coding agents don't
+# mistake it for a place to write documentation.
+scratchpad_notice() {
+    echo "> Jess's scratch pad — throwaway notes only. Agents: do not write documentation here; update an existing doc in docs/ (index: docs/README.md) or create a new one there via /docs."
+}
+
 # Prefer tmp/; fall back to legacy docs/local/<feature>.md and docs/<feature>.md
 # from older workspaces.
 resolve_scratchpad() {
@@ -507,6 +513,8 @@ Git branch:  $feature
 Path:        $workspace_dir
 ---
 
+$(scratchpad_notice)
+
 Start describing your new feature...
 EOF
         fi
@@ -745,6 +753,8 @@ Path:        $workspace_dir
 PR:          $pr_url
 ---
 
+$(scratchpad_notice)
+
 ## PR Description
 
 $pr_description
@@ -759,6 +769,8 @@ Server URL:  $server_url
 Git branch:  $branch
 Path:        $workspace_dir
 ---
+
+$(scratchpad_notice)
 
 No PR found for this branch.
 EOF
@@ -1059,6 +1071,8 @@ Server URL:  $server_url
 Git branch:  $feature
 Path:        $workspace_dir
 ---
+
+$(scratchpad_notice)
 EOF
         fi
 
@@ -1666,15 +1680,70 @@ agent_status_token() {
     esac
 }
 
+# Best-effort "last worked on" timestamp for a workspace directory, as epoch
+# seconds (0 = no signal). Takes the newer of:
+#   - the newest Claude Code session file for this path (every Claude turn
+#     appends to its .jsonl, so mtime tracks conversation activity)
+#   - the last reflog entry in the worktree (commit/checkout/pull/reset)
+# Worktree file mtimes and the git index are deliberately NOT used: bulk
+# operations (yarn install, background git status sweeps) touch them without
+# any real work happening.
+last_active_ts() {
+    local workspace_dir="$1"
+    local newest=0 ts
+
+    # Claude Code encodes project dirs by replacing / with -
+    # (same encoding as consolidate_claude_sessions)
+    local claude_dir="$HOME/.claude/projects/${workspace_dir//\//-}"
+    local newest_jsonl
+    newest_jsonl=$(ls -t "$claude_dir"/*.jsonl 2>/dev/null | head -1)
+    if [[ -n "$newest_jsonl" ]]; then
+        ts=$(stat -f %m "$newest_jsonl" 2>/dev/null || true)
+        if [[ -n "$ts" && "$ts" -gt "$newest" ]]; then
+            newest=$ts
+        fi
+    fi
+
+    ts=$(git -C "$workspace_dir" log -g -1 --format=%ct HEAD 2>/dev/null || true)
+    if [[ -n "$ts" && "$ts" -gt "$newest" ]]; then
+        newest=$ts
+    fi
+
+    echo "$newest"
+}
+
+# Render an epoch timestamp as a compact relative time ("5m ago", "3h ago",
+# "4d ago", then "Jun 12"). 0 renders as the table blank placeholder.
+format_last_active() {
+    local ts="$1"
+    if [[ -z "$ts" || "$ts" -eq 0 ]]; then
+        echo "~"
+        return
+    fi
+
+    local diff=$(( $(date +%s) - ts ))
+    if (( diff < 3600 )); then
+        echo "$(( diff / 60 ))m ago"
+    elif (( diff < 86400 )); then
+        echo "$(( diff / 3600 ))h ago"
+    elif (( diff < 604800 )); then
+        echo "$(( diff / 86400 ))d ago"
+    else
+        date -r "$ts" '+%b %d'
+    fi
+}
+
 cmd_list() {
     local filter_project=""
     local show_pr=false
     local running_only=false
+    local sort_recent=false
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --pr) show_pr=true; shift ;;
             --running) running_only=true; shift ;;
+            --recent) sort_recent=true; shift ;;
             *) filter_project="$1"; shift ;;
         esac
     done
@@ -1690,9 +1759,13 @@ cmd_list() {
         projects=$(list_projects)
     fi
 
+    # Rows carry a "project_idx,epoch," sort-key prefix that is stripped after
+    # sorting, before rendering.
     local rows=""
+    local project_idx=0
 
     for project in $projects; do
+        project_idx=$((project_idx + 1))
         get_project_paths "$project"
 
         # Get worktrees for this project
@@ -1722,14 +1795,16 @@ cmd_list() {
                 main_tmux_status="running"
             fi
             local main_tmux_display="${main_tmux_status:-~}"
-            local main_status
+            local main_status main_ts main_last
             main_status=$(agent_status_token "$main_tmux")
+            main_ts=$(last_active_ts "$PROJECT_PATH")
+            main_last=$(format_last_active "$main_ts")
             if [[ "$running_only" == true && -z "$main_tmux_status" ]]; then
                 : # skip non-running workspace
             elif [[ "$show_pr" == true ]]; then
-                rows+="$project,main,$main_branch,$main_tmux_display,~,$main_status"$'\n'
+                rows+="$project_idx,$main_ts,$project,main,$main_branch,$main_tmux_display,~,$main_last,$main_status"$'\n'
             else
-                rows+="$project,main,$main_branch,$main_tmux_display,$main_status"$'\n'
+                rows+="$project_idx,$main_ts,$project,main,$main_branch,$main_tmux_display,$main_last,$main_status"$'\n'
             fi
         fi
 
@@ -1773,15 +1848,17 @@ cmd_list() {
 
             # Pad tmux/pr values so column alignment uses consistent width
             local tmux_display="${tmux_status:-~}"
-            local status_token
+            local status_token wt_ts wt_last
             status_token=$(agent_status_token "$tmux_session")
+            wt_ts=$(last_active_ts "$path")
+            wt_last=$(format_last_active "$wt_ts")
             if [[ "$running_only" == true && -z "$tmux_status" ]]; then
                 continue
             elif [[ "$show_pr" == true ]]; then
                 local pr_display="${pr_status:-~}"
-                rows+="$project,$feature,$branch,$tmux_display,$pr_display,$status_token"$'\n'
+                rows+="$project_idx,$wt_ts,$project,$feature,$branch,$tmux_display,$pr_display,$wt_last,$status_token"$'\n'
             else
-                rows+="$project,$feature,$branch,$tmux_display,$status_token"$'\n'
+                rows+="$project_idx,$wt_ts,$project,$feature,$branch,$tmux_display,$wt_last,$status_token"$'\n'
             fi
         done <<< "$workspace_worktrees"
     done
@@ -1795,13 +1872,23 @@ cmd_list() {
         return
     fi
 
+    # Sort by config project order, then most-recent-first within each project.
+    # --recent drops the grouping: one most-recent-first list across projects.
+    if [[ "$sort_recent" == true ]]; then
+        rows=$(printf '%s' "$rows" | sort -t, -k2,2nr)
+    else
+        rows=$(printf '%s' "$rows" | sort -t, -k1,1n -k2,2nr)
+    fi
+    rows=$(echo "$rows" | cut -d, -f3-)
+
     local table header_line separator max_width
     local header="Project,Workspace,Branch,Tmux"
     if [[ "$show_pr" == true ]]; then
         header="$header,PR"
     fi
-    header="$header,Status"
-    table=$(printf "%s\n%s" "$header" "$rows" | column -t -s,)
+    header="$header,Last active,Status"
+    # Trailing newline matters: macOS column errors on unterminated last lines
+    table=$(printf "%s\n%s\n" "$header" "$rows" | column -t -s,)
     header_line=$(echo "$table" | head -1)
     max_width=$(echo "$table" | awk '{ if (length > max) max = length } END { print max }')
     separator=$(printf '%*s' "$max_width" '' | tr ' ' '-')
@@ -2084,7 +2171,7 @@ usage() {
     echo "  stop <project> [feature]     Stop workspace(s) without deleting (all for project if no feature given)"
     echo "  delete <project> <feature>   Delete a workspace"
     echo "  info                         Show info about the current workspace"
-    echo "  list [project] [--pr] [--running]  List workspaces (--pr for PR status, --running for active only)"
+    echo "  list [project] [--pr] [--running] [--recent]  List workspaces (--pr for PR status, --running for active only, --recent to sort by last active)"
     echo "  ports [--running]            Show all port and Redis allocations (--running for active only)"
     echo "  install-hooks                Install Claude Code hooks so 'list' can show agent status"
     echo ""

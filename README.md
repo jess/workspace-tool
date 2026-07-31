@@ -213,9 +213,12 @@ workspace list              # All projects
 workspace list myapp        # Specific project
 workspace list --pr         # Include PR status (slower, queries GitHub)
 workspace list myapp --pr   # Specific project with PR status
+workspace list --recent     # Sort by last active across projects
 ```
 
 Shows all active worktrees (including main if initialized) with their tmux status. Use `--pr` to include PR status (open/merged/closed) via GitHub CLI. The **Status** column reports the state of each workspace's Claude Code session (see below).
+
+The **Last active** column shows when each workspace was last worked on — the newer of its latest Claude Code session activity and its latest git operation (commit/checkout/pull). Within each project, rows sort most-recent-first; `--recent` drops the project grouping and sorts the whole list most-recent-first instead, which is handy after a reboot to see what you had open. Recent activity shows as relative time (`14m ago`, `2d ago`), older activity as a date (`Jun 12`), and a blank means no signal (never used with Claude, no local git activity).
 
 ### Agent status
 
@@ -232,12 +235,12 @@ Each workspace's Claude Code session reports what it's doing, so you can glance 
 **In `workspace list`**, as a Status column:
 
 ```
-Project  Workspace   Branch     Tmux     Status
-------------------------------------------------
-myapp    main        main       running  ● working
-myapp    checkout    checkout   running  ▲ needs you
-myapp    search      search-ui  running  ○ idle
-myapp    invoices    invoices   ~
+Project  Workspace   Branch     Tmux     Last active  Status
+-------------------------------------------------------------
+myapp    main        main       running  2m ago       ● working
+myapp    checkout    checkout   running  8m ago       ▲ needs you
+myapp    search      search-ui  running  1h ago       ○ idle
+myapp    invoices    invoices            Jun 12
 ```
 
 - **● working** — a prompt is being worked on

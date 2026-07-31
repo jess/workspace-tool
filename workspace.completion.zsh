@@ -37,7 +37,7 @@ _workspace() {
                     fi
                     ;;
                 list)
-                    local flags=('--pr:Show PR status' '--running:Show only active workspaces')
+                    local flags=('--pr:Show PR status' '--running:Show only active workspaces' '--recent:Sort by last active across projects')
                     local projects
                     projects=($(awk '/^  [a-zA-Z_-]+:$/ { proj = $1; gsub(/:$/, "", proj); print proj }' "$config_file" 2>/dev/null))
                     local options=("${(@)flags}" "${(@)projects}")
