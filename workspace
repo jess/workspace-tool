@@ -338,6 +338,78 @@ resolve_worktree_path() {
 }
 
 # ============================================================================
+# Claude Code folder trust
+# ============================================================================
+
+# Claude Code shows its folder-trust dialog on first launch in every new
+# worktree: each worktree is its own trust root, and trust never cascades from
+# parent directories. Pre-seeding the trust entry in ~/.claude.json (top-level
+# "projects" object, keyed by absolute path) lets scripted workspace sessions
+# land straight in a working Claude session. hasTrustDialogAccepted is an
+# undocumented key — if a future Claude Code changes it, the only failure mode
+# is the trust prompt returning.
+#
+# Always returns 0 (a failed seed must never break workspace creation) and
+# reports the outcome for the summary via CLAUDE_TRUST_SUMMARY.
+claude_trust_edit() {
+    local mode="$1"          # add | remove
+    local worktree_path="$2"
+    local claude_config="$HOME/.claude.json"
+    CLAUDE_TRUST_SUMMARY="not pre-seeded (trust prompt will appear once)"
+
+    if [[ ! -f "$claude_config" ]]; then
+        [[ "$mode" == "add" ]] && echo -e "${YELLOW}Warning: $claude_config not found; Claude will show its trust prompt once.${NC}"
+        return 0
+    fi
+    if ! command -v python3 &>/dev/null; then
+        [[ "$mode" == "add" ]] && echo -e "${YELLOW}Warning: python3 not found; Claude will show its trust prompt once.${NC}"
+        return 0
+    fi
+
+    # Match the key form Claude Code uses: absolute path, no trailing slash
+    worktree_path="${worktree_path%/}"
+
+    # ~/.claude.json is live config for running Claude sessions: write to a
+    # tmp file (with matching permissions — the file holds account data) and
+    # atomically replace, never truncate in place.
+    if python3 - "$mode" "$worktree_path" <<'PY' 2>/dev/null
+import json, os, sys
+mode, path = sys.argv[1], sys.argv[2]
+f = os.path.expanduser('~/.claude.json')
+with open(f) as fh:
+    d = json.load(fh)
+if mode == 'add':
+    d.setdefault('projects', {}).setdefault(path, {})['hasTrustDialogAccepted'] = True
+else:
+    d.get('projects', {}).pop(path, None)
+tmp = f + '.tmp'
+fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, os.stat(f).st_mode & 0o777)
+with os.fdopen(fd, 'w') as out:
+    json.dump(d, out, indent=2)
+os.replace(tmp, f)
+PY
+    then
+        CLAUDE_TRUST_SUMMARY="pre-seeded"
+    else
+        if [[ "$mode" == "add" ]]; then
+            echo -e "${YELLOW}Warning: could not pre-seed Claude trust; the trust prompt will appear once.${NC}"
+        else
+            echo -e "${YELLOW}Warning: could not remove Claude trust entry for $worktree_path${NC}"
+        fi
+    fi
+    return 0
+}
+
+preseed_claude_trust() {
+    echo -e "${YELLOW}Pre-seeding Claude Code folder trust...${NC}"
+    claude_trust_edit add "$1"
+}
+
+remove_claude_trust() {
+    claude_trust_edit remove "$1"
+}
+
+# ============================================================================
 # Subcommand: new
 # ============================================================================
 
@@ -487,6 +559,10 @@ worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
     fi
 
+    if [[ "$is_main" == false ]]; then
+        preseed_claude_trust "$workspace_dir"
+    fi
+
     # Create tmux session (keyed off the directory name so it stays stable
     # even if the branch inside the worktree later changes)
     local session_name
@@ -594,6 +670,9 @@ EOF
     echo ""
     echo -e "  Tmux session: ${YELLOW}$tmux_session${NC}"
     echo -e "  Server URL:   ${YELLOW}$server_url${NC}"
+    if [[ "$is_main" == false ]]; then
+        echo -e "  Claude trust: $CLAUDE_TRUST_SUMMARY"
+    fi
     echo ""
     echo -e "Switch to session:"
     echo -e "  ${YELLOW}tmux switch-client -t $tmux_session${NC}"
@@ -717,6 +796,8 @@ vite: bin/vite dev
 worker: RUBY_DEBUG_OPEN=true bundle exec sidekiq -C config/sidekiq.yml
 EOF
     fi
+
+    preseed_claude_trust "$workspace_dir"
 
     # Create tmux session (keyed off the directory, not the branch)
     local tmux_session="${project}-$(basename "$workspace_dir")"
@@ -845,6 +926,7 @@ EOF
     echo ""
     echo -e "  Tmux session: ${YELLOW}$tmux_session${NC}"
     echo -e "  Server URL:   ${YELLOW}$server_url${NC}"
+    echo -e "  Claude trust: $CLAUDE_TRUST_SUMMARY"
     echo ""
     echo -e "Switch to session:"
     echo -e "  ${YELLOW}tmux switch-client -t $tmux_session${NC}"
@@ -1075,6 +1157,8 @@ Path:        $workspace_dir
 $(scratchpad_notice)
 EOF
         fi
+
+        preseed_claude_trust "$workspace_dir"
 
         # Fall through to tmux session creation below
     fi
@@ -1526,6 +1610,10 @@ cmd_delete() {
 
     # Move Claude Code sessions from the worktree to the main project
     consolidate_claude_sessions "$workspace_dir" "$PROJECT_PATH"
+
+    # Drop the worktree's folder-trust entry so ~/.claude.json doesn't
+    # accumulate dead paths
+    remove_claude_trust "$workspace_dir"
 
     # Ask about deleting the branch
     if [[ -n "$worktree_branch" ]]; then
