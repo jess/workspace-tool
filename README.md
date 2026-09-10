@@ -30,6 +30,8 @@ This tool is designed for Rails projects with the following setup:
 
 Your project uses a `.env` file for configuration. The tool copies this file to each workspace and adds workspace-specific variables.
 
+If the main checkout has a gitignored `config/master.key`, it's copied into the new worktree too (only when the worktree doesn't already have one), so apps that keep secrets in `credentials.yml.enc` — Active Record encryption keys, for example — boot and pass tests without any manual copying. Projects without a `master.key` are unaffected.
+
 ### Vite
 
 Your project uses Vite for asset compilation. Each workspace gets a unique `VITE_RUBY_PORT` to avoid conflicts.
@@ -136,7 +138,7 @@ workspace new myapp my-feature
 This will:
 1. Fetch latest from the default branch (`main` or `master`, auto-detected)
 2. Create a git worktree at `~/projects/myapp/my-feature` with a new branch
-3. Copy `.env` from the main project and add workspace-specific settings (ports, session cookie, Redis DB)
+3. Copy `.env` (and `config/master.key`, if present) from the main project and add workspace-specific settings (ports, session cookie, Redis DB)
 4. Create a tmux session `myapp-my-feature` with:
    - `code` window: vim (with `tmp/my-feature.md` open) + shell
    - `server` window: runs nvm use, bundle install, yarn install, then overmind
@@ -283,6 +285,7 @@ Each workspace gets:
 ~/projects/myapp/my-feature/
 ├── .env                      # Copied from main + workspace settings
 ├── .env.test                 # Forces Vite to compile in test env
+├── config/master.key         # Copied from main if it exists there (gitignored)
 ├── Procfile.workspace        # Copied from project or generated from default
 └── tmp/
     └── my-feature.md         # Feature scratchpad (throwaway)

@@ -59,6 +59,19 @@ expand_path() {
     echo "${path/#\~/$HOME}"
 }
 
+# Copy the gitignored Rails master.key from the main checkout into a new
+# worktree. Without it, apps that keep secrets in credentials.yml.enc (e.g.
+# Active Record encryption keys) fail at boot / in tests. Skips silently when
+# the main checkout has no key; never overwrites one already in the worktree.
+copy_master_key() {
+    local workspace_dir="$1"
+    if [[ -f "$PROJECT_PATH/config/master.key" && ! -f "$workspace_dir/config/master.key" ]]; then
+        echo -e "${YELLOW}Copying master.key...${NC}"
+        mkdir -p "$workspace_dir/config"
+        cp "$PROJECT_PATH/config/master.key" "$workspace_dir/config/master.key"
+    fi
+}
+
 # List all configured projects
 list_projects() {
     awk '/^  [a-zA-Z_-]+:$/ {
@@ -507,6 +520,8 @@ cmd_new() {
             cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
         fi
 
+        copy_master_key "$workspace_dir"
+
         # Copy Claude Code settings so permissions carry over
         if [[ -f "$PROJECT_PATH/.claude/settings.local.json" ]]; then
             echo -e "${YELLOW}Copying Claude Code settings...${NC}"
@@ -745,6 +760,8 @@ cmd_pull() {
         echo -e "${YELLOW}Copying .env file...${NC}"
         cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
     fi
+
+    copy_master_key "$workspace_dir"
 
     # Copy Claude Code settings so permissions carry over
     if [[ -f "$PROJECT_PATH/.claude/settings.local.json" ]]; then
@@ -1093,6 +1110,8 @@ cmd_resume() {
             echo -e "${YELLOW}Copying .env file...${NC}"
             cp "$PROJECT_PATH/.env" "$workspace_dir/.env"
         fi
+
+        copy_master_key "$workspace_dir"
 
         # Copy Claude Code settings so permissions carry over
         if [[ -f "$PROJECT_PATH/.claude/settings.local.json" ]]; then
