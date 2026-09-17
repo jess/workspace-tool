@@ -12,6 +12,13 @@ NC='\033[0m' # No Color
 
 CONFIG_FILE="$HOME/.workspaces.yml"
 
+# Caddy routes <feature>.<project>.test hostnames to each workspace's Rails
+# port. One snippet per workspace lives in the caddy dir, which Homebrew's
+# Caddyfile imports. Both paths can be overridden with top-level `caddy_dir:`
+# and `caddyfile:` keys in ~/.workspaces.yml.
+DEFAULT_CADDY_DIR="$HOME/.workspaces/caddy"
+DEFAULT_CADDYFILE="/opt/homebrew/etc/Caddyfile"
+
 # ============================================================================
 # Config parsing functions
 # ============================================================================
@@ -51,6 +58,19 @@ get_project_config() {
             exit
         }
     ' "$CONFIG_FILE"
+}
+
+# Read a top-level (non-project) key from the config file
+get_top_config() {
+    awk -v key="$1" '
+        $0 ~ "^"key":" {
+            val = $0
+            sub(/^[^:]+:[ \t]*/, "", val)
+            sub(/[ \t]*#.*$/, "", val)
+            print val
+            exit
+        }
+    ' "$CONFIG_FILE" 2>/dev/null
 }
 
 # Expand ~ to $HOME
@@ -127,6 +147,55 @@ sanitize_dir_name() {
     echo "${1//\//-}"
 }
 
+# Rails port recorded in a workspace's .env. Legacy workspaces only recorded
+# VITE_RUBY_PORT, which is always RAILS_PORT + 2. Empty if neither is set.
+workspace_rails_port() {
+    local env_file="$1/.env"
+    [[ -f "$env_file" ]] || return 0
+    local port
+    port=$(grep '^RAILS_PORT=' "$env_file" | cut -d= -f2 | tr -d '"' || true)
+    if [[ -z "$port" ]]; then
+        local vite_port
+        vite_port=$(grep '^VITE_RUBY_PORT=' "$env_file" | cut -d= -f2 | tr -d '"' || true)
+        if [[ -n "$vite_port" ]]; then
+            port=$((vite_port - 2))
+        fi
+    fi
+    echo "$port"
+}
+
+# Strip any earlier workspace-specific vars from .env, append the fresh set,
+# and write the .env.test that forces Vite to compile instead of proxying to
+# the dev server.
+write_workspace_env() {
+    local workspace_dir="$1"
+    local rails_port="$2"
+    local vite_port="$3"
+    local session_cookie="$4"
+    local redis_db="$5"
+
+    echo -e "${YELLOW}Configuring .env...${NC}"
+    if [[ -f "$workspace_dir/.env" ]]; then
+        grep -v '^RAILS_PORT=' "$workspace_dir/.env" | grep -v '^SESSION_COOKIE_NAME=' | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
+        mv "$workspace_dir/.env.tmp" "$workspace_dir/.env"
+    fi
+
+    cat >> "$workspace_dir/.env" << EOF
+
+# Workspace-specific settings
+RAILS_PORT=$rails_port
+VITE_RUBY_PORT=$vite_port
+SESSION_COOKIE_NAME="$session_cookie"
+EOF
+    if [[ -n "$redis_db" ]]; then
+        echo "REDIS_URL=redis://localhost:6379/$redis_db" >> "$workspace_dir/.env"
+    fi
+
+    cat > "$workspace_dir/.env.test" << EOF
+VITE_RUBY_PORT=3037
+EOF
+}
+
 # Feature scratchpad lives under tmp/ so it never overwrites committed docs
 # and the delete-time docs/local rescue doesn't prompt over throwaway notes.
 scratchpad_path() {
@@ -200,11 +269,19 @@ show_banner() {
     local project="$3"
     local label="$4"
     local server="$5"
+    local host_url="${6:-}"
+
+    # Extra "Host:" line when the workspace has a Caddy hostname. The URL is
+    # spliced into the printf format, which is safe: it never contains % or \.
+    local host_line=""
+    if [[ -n "$host_url" ]]; then
+        host_line="\nHost:    $host_url"
+    fi
 
     cat > "$workspace_dir/.show-banner.sh" << BANNER_SCRIPT
 #!/usr/bin/env bash
 clear
-printf "Project: %s\n%s\nServer:  %s" "$project" "$label" "$server" \
+printf "Project: %s\n%s\nServer:  %s$host_line" "$project" "$label" "$server" \
     | gum style --border rounded --border-foreground "#7D56F4" --padding "0 1"
 rm -f "\$0"
 BANNER_SCRIPT
@@ -351,6 +428,138 @@ resolve_worktree_path() {
 }
 
 # ============================================================================
+# Caddy hostnames
+# ============================================================================
+#
+# Every workspace gets a readable hostname on top of its localhost:<port> URL:
+# <feature>.<project>.test, or main.<project>.test for the main checkout. The
+# hostname key is the same one the tmux session uses (the worktree directory
+# name, or "main"), so it stays stable if the branch inside a worktree changes.
+#
+# dnsmasq already resolves every *.test name to 127.0.0.1; Caddy listening on
+# :80 does the other half, routing by Host header to the workspace's Rails
+# port. One snippet file per workspace lives in the caddy dir and Homebrew's
+# Caddyfile imports the whole directory. Ports are the source of truth — the
+# snippets are derived from each worktree's .env and can be regenerated at any
+# time with `workspace caddy-sync`.
+#
+# Caddy being absent, stopped, or unconfigured is only ever a warning: the
+# localhost:<port> URL keeps working regardless.
+
+CADDY_MANAGED_MARK="# Managed by workspace"
+
+caddy_dir() {
+    local dir
+    dir=$(get_top_config "caddy_dir")
+    expand_path "${dir:-$DEFAULT_CADDY_DIR}"
+}
+
+caddyfile_path() {
+    local file
+    file=$(get_top_config "caddyfile")
+    expand_path "${file:-$DEFAULT_CADDYFILE}"
+}
+
+# Lowercase and reduce to [a-z0-9-] so a name like Feature/Foo_bar.v2 becomes
+# one valid DNS label (feature-foo-bar-v2).
+dns_label() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+# <key>.<project>.test — key is "main" or the worktree directory name
+workspace_hostname() {
+    local project="$1"
+    local key="$2"
+    if is_main_workspace "$key"; then
+        key="main"
+    fi
+    echo "$(dns_label "$key").$(dns_label "$project").test"
+}
+
+caddy_snippet_path() {
+    local project="$1"
+    local key="$2"
+    if is_main_workspace "$key"; then
+        key="main"
+    fi
+    echo "$(caddy_dir)/$(dns_label "$project")-$(dns_label "$key").caddy"
+}
+
+# Write the snippet for one workspace. Returns 0 if the file was created or
+# changed (so the caller knows to reload), 1 if it was already up to date.
+write_caddy_snippet() {
+    local project="$1"
+    local key="$2"
+    local port="$3"
+    local snippet hostname content
+    snippet=$(caddy_snippet_path "$project" "$key")
+    hostname=$(workspace_hostname "$project" "$key")
+    content="$CADDY_MANAGED_MARK — regenerated by 'workspace caddy-sync'; edits will be lost.
+http://$hostname {
+	reverse_proxy localhost:$port
+}"
+    mkdir -p "$(dirname "$snippet")"
+    if [[ -f "$snippet" ]] && [[ "$(cat "$snippet")" == "$content" ]]; then
+        return 1
+    fi
+    printf '%s\n' "$content" > "$snippet"
+    return 0
+}
+
+caddy_running() {
+    curl -s -m 1 -o /dev/null http://localhost:2019/config/ 2>/dev/null
+}
+
+# Reload Caddy so added/removed snippets take effect. Never fails — every
+# problem is a warning, because the port URL works without Caddy.
+caddy_reload() {
+    local caddyfile dir
+    caddyfile=$(caddyfile_path)
+    dir=$(caddy_dir)
+
+    if ! command -v caddy &>/dev/null; then
+        echo -e "${YELLOW}Caddy is not installed — hostname won't route (brew install caddy; see README)${NC}"
+        return 0
+    fi
+    if ! grep -qs "^[[:space:]]*import $dir/" "$caddyfile"; then
+        echo -e "${YELLOW}$caddyfile does not import $dir — hostname won't route (see README)${NC}"
+        return 0
+    fi
+    if ! caddy_running; then
+        echo -e "${YELLOW}Caddy is not running — hostname won't route until: brew services start caddy${NC}"
+        return 0
+    fi
+
+    local output
+    if output=$(caddy reload --config "$caddyfile" --adapter caddyfile 2>&1); then
+        return 0
+    fi
+    echo -e "${YELLOW}Caddy reload failed — hostname may not route:${NC}"
+    # Drop Caddy's JSON log lines; the trailing "Error: ..." line is the useful bit
+    echo "$output" | grep -v '^{' | sed 's/^/  /'
+    return 0
+}
+
+# Write (or refresh) a workspace's snippet and reload only if it changed
+register_caddy_hostname() {
+    local project="$1"
+    local key="$2"
+    local port="$3"
+    if write_caddy_snippet "$project" "$key" "$port"; then
+        caddy_reload
+    fi
+}
+
+# Remove a workspace's snippet and reload; a no-op if there was none
+unregister_caddy_hostname() {
+    local snippet
+    snippet=$(caddy_snippet_path "$1" "$2")
+    [[ -f "$snippet" ]] || return 0
+    rm -f "$snippet"
+    caddy_reload
+}
+
+# ============================================================================
 # Claude Code folder trust
 # ============================================================================
 
@@ -479,10 +688,19 @@ cmd_new() {
         redis_db=$(next_free_redis_db)
     fi
 
+    # Hostname key: "main", or the worktree directory name (same key as tmux)
+    local host_key="main"
+    if [[ "$is_main" == false ]]; then
+        host_key=$(basename "$workspace_dir")
+    fi
+    local host_url
+    host_url="http://$(workspace_hostname "$project" "$host_key")"
+
     echo -e "${GREEN}Creating new workspace: $feature${NC}"
     echo -e "  Project:             $project"
     echo -e "  Workspace directory: $workspace_dir"
     echo -e "  Rails port:          $rails_port"
+    echo -e "  Hostname:            $host_url"
     echo -e "  Vite port:           $vite_port"
     echo -e "  Session cookie:      $session_cookie"
     [[ -n "$redis_db" ]] && echo -e "  Redis DB:            $redis_db"
@@ -530,31 +748,10 @@ cmd_new() {
         fi
     fi
 
-    # Update .env file with workspace-specific settings
-    echo -e "${YELLOW}Configuring .env...${NC}"
+    write_workspace_env "$workspace_dir" "$rails_port" "$vite_port" "$session_cookie" "$redis_db"
 
-    # Remove existing workspace-specific vars if present
-    if [[ -f "$workspace_dir/.env" ]]; then
-        grep -v '^RAILS_PORT=' "$workspace_dir/.env" | grep -v '^SESSION_COOKIE_NAME=' | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
-        mv "$workspace_dir/.env.tmp" "$workspace_dir/.env"
-    fi
-
-    # Append workspace-specific settings
-    cat >> "$workspace_dir/.env" << EOF
-
-# Workspace-specific settings
-RAILS_PORT=$rails_port
-VITE_RUBY_PORT=$vite_port
-SESSION_COOKIE_NAME="$session_cookie"
-EOF
-    if [[ -n "$redis_db" ]]; then
-        echo "REDIS_URL=redis://localhost:6379/$redis_db" >> "$workspace_dir/.env"
-    fi
-
-    # Create .env.test to force Vite to compile instead of proxying to dev server
-    cat > "$workspace_dir/.env.test" << EOF
-VITE_RUBY_PORT=3037
-EOF
+    # Register the hostname with Caddy (warning only if Caddy isn't around)
+    register_caddy_hostname "$project" "$host_key" "$rails_port"
 
     # Create a workspace-specific Procfile
     echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
@@ -600,6 +797,7 @@ EOF
 
 ---
 Server URL:  $server_url
+Hostname:    $host_url
 Git branch:  $feature
 Path:        $workspace_dir
 ---
@@ -624,9 +822,9 @@ EOF
 
     # Display banner in shell pane
     if [[ "$is_main" == true ]]; then
-        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  main" "$server_url"
+        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  main" "$server_url" "$host_url"
     else
-        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Feature: $feature" "$server_url"
+        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Feature: $feature" "$server_url" "$host_url"
     fi
 
     # Create second window for server
@@ -685,6 +883,7 @@ EOF
     echo ""
     echo -e "  Tmux session: ${YELLOW}$tmux_session${NC}"
     echo -e "  Server URL:   ${YELLOW}$server_url${NC}"
+    echo -e "  Hostname:     ${YELLOW}$host_url${NC}"
     if [[ "$is_main" == false ]]; then
         echo -e "  Claude trust: $CLAUDE_TRUST_SUMMARY"
     fi
@@ -732,6 +931,9 @@ cmd_pull() {
     local vite_port=$((rails_port + 2))
     local server_url="http://localhost:$rails_port"
     local session_cookie="${project}_cookie_${rails_port}"
+    local host_key host_url
+    host_key=$(basename "$workspace_dir")
+    host_url="http://$(workspace_hostname "$project" "$host_key")"
 
     local redis_db=""
     if [[ "$USES_REDIS" == "true" ]]; then
@@ -742,6 +944,7 @@ cmd_pull() {
     echo -e "  Project:             $project"
     echo -e "  Workspace directory: $workspace_dir"
     echo -e "  Rails port:          $rails_port"
+    echo -e "  Hostname:            $host_url"
     echo -e "  Vite port:           $vite_port"
     echo -e "  Session cookie:      $session_cookie"
     [[ -n "$redis_db" ]] && echo -e "  Redis DB:            $redis_db"
@@ -770,31 +973,10 @@ cmd_pull() {
         cp "$PROJECT_PATH/.claude/settings.local.json" "$workspace_dir/.claude/settings.local.json"
     fi
 
-    # Update .env file with workspace-specific settings
-    echo -e "${YELLOW}Configuring .env...${NC}"
+    write_workspace_env "$workspace_dir" "$rails_port" "$vite_port" "$session_cookie" "$redis_db"
 
-    # Remove existing workspace-specific vars if present
-    if [[ -f "$workspace_dir/.env" ]]; then
-        grep -v '^RAILS_PORT=' "$workspace_dir/.env" | grep -v '^SESSION_COOKIE_NAME=' | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
-        mv "$workspace_dir/.env.tmp" "$workspace_dir/.env"
-    fi
-
-    # Append workspace-specific settings
-    cat >> "$workspace_dir/.env" << EOF
-
-# Workspace-specific settings
-RAILS_PORT=$rails_port
-VITE_RUBY_PORT=$vite_port
-SESSION_COOKIE_NAME="$session_cookie"
-EOF
-    if [[ -n "$redis_db" ]]; then
-        echo "REDIS_URL=redis://localhost:6379/$redis_db" >> "$workspace_dir/.env"
-    fi
-
-    # Create .env.test to force Vite to compile instead of proxying to dev server
-    cat > "$workspace_dir/.env.test" << EOF
-VITE_RUBY_PORT=3037
-EOF
+    # Register the hostname with Caddy (warning only if Caddy isn't around)
+    register_caddy_hostname "$project" "$host_key" "$rails_port"
 
     # Create a workspace-specific Procfile
     echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
@@ -846,6 +1028,7 @@ EOF
 
 ---
 Server URL:  $server_url
+Hostname:    $host_url
 Git branch:  $branch
 Path:        $workspace_dir
 PR:          $pr_url
@@ -864,6 +1047,7 @@ EOF
 
 ---
 Server URL:  $server_url
+Hostname:    $host_url
 Git branch:  $branch
 Path:        $workspace_dir
 ---
@@ -885,7 +1069,7 @@ EOF
     tmux split-window -h -t "$tmux_session:code" -c "$workspace_dir"
 
     # Display banner in shell pane
-    show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  $branch" "$server_url"
+    show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  $branch" "$server_url" "$host_url"
 
     # Create second window for server
     tmux new-window -t "$tmux_session" -c "$workspace_dir" -n "server"
@@ -943,6 +1127,7 @@ EOF
     echo ""
     echo -e "  Tmux session: ${YELLOW}$tmux_session${NC}"
     echo -e "  Server URL:   ${YELLOW}$server_url${NC}"
+    echo -e "  Hostname:     ${YELLOW}$host_url${NC}"
     echo -e "  Claude trust: $CLAUDE_TRUST_SUMMARY"
     echo ""
     echo -e "Switch to session:"
@@ -1096,6 +1281,7 @@ cmd_resume() {
         echo -e "  Project:             $project"
         echo -e "  Workspace directory: $workspace_dir"
         echo -e "  Rails port:          $rails_port"
+        echo -e "  Hostname:            http://$(workspace_hostname "$project" "$(basename "$workspace_dir")")"
         echo -e "  Vite port:           $vite_port"
         echo -e "  Session cookie:      $session_cookie"
         [[ -n "$redis_db" ]] && echo -e "  Redis DB:            $redis_db"
@@ -1120,28 +1306,7 @@ cmd_resume() {
             cp "$PROJECT_PATH/.claude/settings.local.json" "$workspace_dir/.claude/settings.local.json"
         fi
 
-        # Update .env file with workspace-specific settings
-        echo -e "${YELLOW}Configuring .env...${NC}"
-        if [[ -f "$workspace_dir/.env" ]]; then
-            grep -v '^RAILS_PORT=' "$workspace_dir/.env" | grep -v '^SESSION_COOKIE_NAME=' | grep -v '^VITE_RUBY_PORT=' | grep -v '^REDIS_URL=' > "$workspace_dir/.env.tmp" || true
-            mv "$workspace_dir/.env.tmp" "$workspace_dir/.env"
-        fi
-
-        cat >> "$workspace_dir/.env" << EOF
-
-# Workspace-specific settings
-RAILS_PORT=$rails_port
-VITE_RUBY_PORT=$vite_port
-SESSION_COOKIE_NAME="$session_cookie"
-EOF
-        if [[ -n "$redis_db" ]]; then
-            echo "REDIS_URL=redis://localhost:6379/$redis_db" >> "$workspace_dir/.env"
-        fi
-
-        # Create .env.test
-        cat > "$workspace_dir/.env.test" << EOF
-VITE_RUBY_PORT=3037
-EOF
+        write_workspace_env "$workspace_dir" "$rails_port" "$vite_port" "$session_cookie" "$redis_db"
 
         # Create Procfile.workspace
         echo -e "${YELLOW}Creating Procfile.workspace...${NC}"
@@ -1232,11 +1397,27 @@ EOF
         fi
     fi
 
+    # Make sure the hostname is registered with Caddy. Usually a no-op; it
+    # backfills workspaces created before hostnames existed and repairs a
+    # snippet that went missing.
+    local host_key="main"
+    if ! is_main_workspace "$feature"; then
+        host_key=$(basename "$workspace_dir")
+    fi
+    local host_url=""
+    if [[ -n "${rails_port:-}" ]]; then
+        host_url="http://$(workspace_hostname "$project" "$host_key")"
+        register_caddy_hostname "$project" "$host_key" "$rails_port"
+    fi
+
     echo -e "${GREEN}Resuming workspace: $feature${NC}"
     echo -e "  Project:             $project"
     echo -e "  Workspace directory: $workspace_dir"
     if [[ -n "$server_url" ]]; then
         echo -e "  Server URL:          $server_url"
+    fi
+    if [[ -n "$host_url" ]]; then
+        echo -e "  Hostname:            $host_url"
     fi
     echo ""
 
@@ -1264,9 +1445,9 @@ EOF
 
     # Display banner in shell pane
     if is_main_workspace "$feature"; then
-        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  main" "${server_url:-"(unknown)"}"
+        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Branch:  main" "${server_url:-"(unknown)"}" "$host_url"
     else
-        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Feature: $feature" "${server_url:-"(unknown)"}"
+        show_banner "$tmux_session:code.1" "$workspace_dir" "$project" "Feature: $feature" "${server_url:-"(unknown)"}" "$host_url"
     fi
 
     # Create second window for server
@@ -1326,6 +1507,9 @@ EOF
     echo -e "  Tmux session: ${YELLOW}$tmux_session${NC}"
     if [[ -n "$server_url" ]]; then
         echo -e "  Server URL:   ${YELLOW}$server_url${NC}"
+    fi
+    if [[ -n "$host_url" ]]; then
+        echo -e "  Hostname:     ${YELLOW}$host_url${NC}"
     fi
     echo ""
     echo -e "Switch to session:"
@@ -1634,6 +1818,9 @@ cmd_delete() {
     # accumulate dead paths
     remove_claude_trust "$workspace_dir"
 
+    # Drop the hostname route. Never fails — a stopped Caddy is just a warning.
+    unregister_caddy_hostname "$project" "$(basename "$workspace_dir")"
+
     # Ask about deleting the branch
     if [[ -n "$worktree_branch" ]]; then
         local branch_exists
@@ -1755,6 +1942,7 @@ cmd_info() {
     echo -e "  ${BLUE}Path${NC}     $found_workspace"
     if [[ -n "$server_url" ]]; then
         echo -e "  ${BLUE}Server${NC}   ${YELLOW}$server_url${NC}"
+        echo -e "  ${BLUE}Host${NC}     ${YELLOW}http://$(workspace_hostname "$found_project" "$found_feature")${NC}"
     fi
     if [[ -n "$rails_port" ]]; then
         echo -e "  ${BLUE}Port${NC}     $rails_port"
@@ -1840,6 +2028,19 @@ format_last_active() {
     fi
 }
 
+# Hostname for a `list`/`ports` row, or "~" (blank) when the workspace has no
+# port recorded — nothing for Caddy to route to in that case.
+list_hostname() {
+    local project="$1"
+    local key="$2"
+    local dir="$3"
+    if [[ -n "$(workspace_rails_port "$dir")" ]]; then
+        workspace_hostname "$project" "$key"
+    else
+        echo "~"
+    fi
+}
+
 cmd_list() {
     local filter_project=""
     local show_pr=false
@@ -1902,16 +2103,17 @@ cmd_list() {
                 main_tmux_status="running"
             fi
             local main_tmux_display="${main_tmux_status:-~}"
-            local main_status main_ts main_last
+            local main_status main_ts main_last main_host
             main_status=$(agent_status_token "$main_tmux")
             main_ts=$(last_active_ts "$PROJECT_PATH")
             main_last=$(format_last_active "$main_ts")
+            main_host=$(list_hostname "$project" "main" "$PROJECT_PATH")
             if [[ "$running_only" == true && -z "$main_tmux_status" ]]; then
                 : # skip non-running workspace
             elif [[ "$show_pr" == true ]]; then
-                rows+="$project_idx,$main_ts,$project,main,$main_branch,$main_tmux_display,~,$main_last,$main_status"$'\n'
+                rows+="$project_idx,$main_ts,$project,main,$main_branch,$main_host,$main_tmux_display,~,$main_last,$main_status"$'\n'
             else
-                rows+="$project_idx,$main_ts,$project,main,$main_branch,$main_tmux_display,$main_last,$main_status"$'\n'
+                rows+="$project_idx,$main_ts,$project,main,$main_branch,$main_host,$main_tmux_display,$main_last,$main_status"$'\n'
             fi
         fi
 
@@ -1955,17 +2157,18 @@ cmd_list() {
 
             # Pad tmux/pr values so column alignment uses consistent width
             local tmux_display="${tmux_status:-~}"
-            local status_token wt_ts wt_last
+            local status_token wt_ts wt_last wt_host
             status_token=$(agent_status_token "$tmux_session")
             wt_ts=$(last_active_ts "$path")
             wt_last=$(format_last_active "$wt_ts")
+            wt_host=$(list_hostname "$project" "$feature" "$path")
             if [[ "$running_only" == true && -z "$tmux_status" ]]; then
                 continue
             elif [[ "$show_pr" == true ]]; then
                 local pr_display="${pr_status:-~}"
-                rows+="$project_idx,$wt_ts,$project,$feature,$branch,$tmux_display,$pr_display,$wt_last,$status_token"$'\n'
+                rows+="$project_idx,$wt_ts,$project,$feature,$branch,$wt_host,$tmux_display,$pr_display,$wt_last,$status_token"$'\n'
             else
-                rows+="$project_idx,$wt_ts,$project,$feature,$branch,$tmux_display,$wt_last,$status_token"$'\n'
+                rows+="$project_idx,$wt_ts,$project,$feature,$branch,$wt_host,$tmux_display,$wt_last,$status_token"$'\n'
             fi
         done <<< "$workspace_worktrees"
     done
@@ -1989,7 +2192,7 @@ cmd_list() {
     rows=$(echo "$rows" | cut -d, -f3-)
 
     local table header_line separator max_width
-    local header="Project,Workspace,Branch,Tmux"
+    local header="Project,Workspace,Branch,Host,Tmux"
     if [[ "$show_pr" == true ]]; then
         header="$header,PR"
     fi
@@ -2049,7 +2252,7 @@ cmd_ports() {
                 main_rails=$((main_vite - 2))
             fi
             if [[ -n "$main_rails" || -n "$main_vite" || -n "$main_db" ]]; then
-                rows+="$project,main,$main_rails,$main_vite,$main_db"$'\n'
+                rows+="$project,main,$main_rails,$main_vite,$main_db,$(list_hostname "$project" main "$PROJECT_PATH")"$'\n'
             fi
         fi
 
@@ -2079,7 +2282,7 @@ cmd_ports() {
 
             [[ -z "$rails_port" && -z "$vite_port" && -z "$db" ]] && continue
 
-            rows+="$project,$feature,$rails_port,$vite_port,$db"$'\n'
+            rows+="$project,$feature,$rails_port,$vite_port,$db,$(list_hostname "$project" "$feature" "$path")"$'\n'
         done <<< "$workspace_worktrees"
     done
 
@@ -2093,15 +2296,107 @@ cmd_ports() {
     fi
 
     local table header_line separator max_width
-    table=$(printf "Project,Workspace,Rails,Vite,Redis\n%s" "$rows" | column -t -s,)
+    table=$(printf "Project,Workspace,Rails,Vite,Redis,Host\n%s" "$rows" | column -t -s,)
     header_line=$(echo "$table" | head -1)
     max_width=$(echo "$table" | awk '{ if (length > max) max = length } END { print max }')
     separator=$(printf '%*s' "$max_width" '' | tr ' ' '-')
-    table=$(printf "%s\n%s\n%s" "$header_line" "$separator" "$(echo "$table" | tail -n +2)")
+    table=$(printf "%s\n%s\n%s" "$header_line" "$separator" "$(echo "$table" | tail -n +2 | sed 's/~/ /g')")
     echo "$table" | gum style \
         --border rounded \
         --border-foreground "#7D56F4" \
         --padding "0 1"
+}
+
+# ============================================================================
+# Subcommand: caddy-sync
+# ============================================================================
+
+# Regenerate every hostname snippet from the worktrees on disk, drop snippets
+# for workspaces that no longer exist, and reload Caddy. Backfills workspaces
+# created before hostnames existed and repairs drift. Read-only with respect
+# to the worktrees themselves — it only reads each one's .env.
+cmd_caddy_sync() {
+    local dir
+    dir=$(caddy_dir)
+    mkdir -p "$dir"
+
+    local expected=()
+    local written=0 unchanged=0 removed=0
+    local rows=""
+
+    for project in $(list_projects); do
+        get_project_paths "$project"
+
+        local worktrees
+        worktrees=$(git -C "$PROJECT_PATH" worktree list 2>/dev/null || true)
+        [[ -z "$worktrees" ]] && continue
+
+        # "<key> <path>" per workspace: main (if initialized) then worktrees
+        local entries=""
+        if [[ -f "$PROJECT_PATH/Procfile.workspace" ]]; then
+            entries="main $PROJECT_PATH"$'\n'
+        fi
+        while IFS= read -r line; do
+            local path
+            path=$(echo "$line" | awk '{print $1}')
+            [[ "$path" == "$PROJECT_PATH" ]] && continue
+            entries+="$(basename "$path") $path"$'\n'
+        done <<< "$worktrees"
+
+        while read -r key path; do
+            [[ -n "$key" ]] || continue
+            local port
+            port=$(workspace_rails_port "$path")
+            [[ -n "$port" ]] || continue
+
+            expected+=("$(caddy_snippet_path "$project" "$key")")
+            if write_caddy_snippet "$project" "$key" "$port"; then
+                written=$((written + 1))
+            else
+                unchanged=$((unchanged + 1))
+            fi
+            rows+="$project,$key,$(workspace_hostname "$project" "$key"),$port"$'\n'
+        done <<< "$entries"
+    done
+
+    # Remove managed snippets for workspaces that no longer exist. Files
+    # without the managed marker were put there by hand and are left alone.
+    local f e keep
+    for f in "$dir"/*.caddy; do
+        [[ -f "$f" ]] || continue
+        grep -qs "^$CADDY_MANAGED_MARK" "$f" || continue
+        keep=false
+        for e in "${expected[@]}"; do
+            if [[ "$e" == "$f" ]]; then
+                keep=true
+                break
+            fi
+        done
+        if [[ "$keep" == false ]]; then
+            rm -f "$f"
+            removed=$((removed + 1))
+        fi
+    done
+
+    echo -e "${GREEN}Caddy snippets synced:${NC} $dir"
+    echo -e "  Written: $written   Unchanged: $unchanged   Removed: $removed"
+    echo ""
+
+    if [[ -n "$rows" ]]; then
+        local table header_line separator max_width
+        table=$(printf "Project,Workspace,Host,Rails\n%s" "$rows" | column -t -s,)
+        header_line=$(echo "$table" | head -1)
+        max_width=$(echo "$table" | awk '{ if (length > max) max = length } END { print max }')
+        separator=$(printf '%*s' "$max_width" '' | tr ' ' '-')
+        table=$(printf "%s\n%s\n%s" "$header_line" "$separator" "$(echo "$table" | tail -n +2)")
+        echo "$table" | gum style \
+            --border rounded \
+            --border-foreground "#7D56F4" \
+            --padding "0 1"
+        echo ""
+    fi
+
+    caddy_reload
 }
 
 # ============================================================================
@@ -2280,6 +2575,7 @@ usage() {
     echo "  info                         Show info about the current workspace"
     echo "  list [project] [--pr] [--running] [--recent]  List workspaces (--pr for PR status, --running for active only, --recent to sort by last active)"
     echo "  ports [--running]            Show all port and Redis allocations (--running for active only)"
+    echo "  caddy-sync                   Regenerate Caddy hostname snippets from the worktrees on disk"
     echo "  install-hooks                Install Claude Code hooks so 'list' can show agent status"
     echo ""
     echo "Examples:"
@@ -2338,6 +2634,10 @@ main() {
         ports|redis)
             check_config
             cmd_ports "$@"
+            ;;
+        caddy-sync)
+            check_config
+            cmd_caddy_sync
             ;;
         install-hooks)
             cmd_install_hooks

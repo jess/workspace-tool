@@ -6,6 +6,12 @@
 #     $RAILS_PORT - the generated Rails server port
 #     $VITE_PORT  - the generated Vite port
 #   If no template exists, a default Rails/Sidekiq template is used.
+#
+# Hostnames (optional):
+#   Each workspace also answers at http://<feature>.<project>.test via Caddy.
+#   These two keys are the defaults; uncomment to override.
+# caddy_dir: ~/.workspaces/caddy            # one snippet per workspace
+# caddyfile: /opt/homebrew/etc/Caddyfile    # must contain: import <caddy_dir>/*.caddy
 
 projects:
   myproject:

@@ -11,6 +11,7 @@ _workspace() {
         'info:Show info about the current workspace'
         'list:List all workspaces'
         'ports:Show all port and Redis allocations (--running for active only)'
+        'caddy-sync:Regenerate Caddy hostname snippets from the worktrees on disk'
         'install-hooks:Install Claude Code hooks so list can show agent status'
     )
 

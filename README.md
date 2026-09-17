@@ -14,6 +14,7 @@ Opinionated? Absolutely. It assumes you're running Rails, tmux, overmind, and vi
 - Resume existing workspaces with a single command
 - Auto-configured tmux sessions with vim + shell + server windows
 - Random port assignment to avoid conflicts between workspaces
+- A readable hostname per workspace (`my-feature.myapp.test`) routed by Caddy, on top of the port
 - Automatic Redis DB allocation (1-15) across all projects
 - Per-project Procfile customization (direct or via templates)
 - Automatic `.env` copying with workspace-specific overrides
@@ -61,6 +62,7 @@ Each workspace gets its own Redis DB number (1-15) to avoid data conflicts. The 
 - gum (for styled output)
 - gh (optional, for PR status in `list` and PR descriptions in `pull`)
 - jq (optional, for `install-hooks` — the agent status column)
+- caddy + dnsmasq (optional, for `<feature>.<project>.test` hostnames — see [Hostnames](#hostnames))
 
 ### macOS
 
@@ -96,6 +98,15 @@ projects:
   myapp:
     path: ~/projects/myapp/main          # Main checkout (source of .env)
     worktree_dir: ~/projects/myapp/workspaces      # Where worktrees are created
+```
+
+### Hostname routing (optional)
+
+Two top-level keys control where the Caddy snippets live and which Caddyfile imports them. The defaults match a Homebrew install:
+
+```yaml
+caddy_dir: ~/.workspaces/caddy           # one snippet per workspace
+caddyfile: /opt/homebrew/etc/Caddyfile   # must `import <caddy_dir>/*.caddy`
 ```
 
 ### Custom Procfile (optional)
@@ -139,10 +150,11 @@ This will:
 1. Fetch latest from the default branch (`main` or `master`, auto-detected)
 2. Create a git worktree at `~/projects/myapp/my-feature` with a new branch
 3. Copy `.env` (and `config/master.key`, if present) from the main project and add workspace-specific settings (ports, session cookie, Redis DB)
-4. Create a tmux session `myapp-my-feature` with:
+4. Register `http://my-feature.myapp.test` with Caddy (see [Hostnames](#hostnames))
+5. Create a tmux session `myapp-my-feature` with:
    - `code` window: vim (with `tmp/my-feature.md` open) + shell
    - `server` window: runs nvm use, bundle install, yarn install, then overmind
-5. Generate `tmp/my-feature.md` with workspace details
+6. Generate `tmp/my-feature.md` with workspace details
 
 ### Create a workspace from an existing branch
 
@@ -168,7 +180,7 @@ workspace resume myapp              # Resume all workspaces for project
 workspace resume --all              # Resume all workspaces across all projects
 ```
 
-Re-creates the tmux session and server for an existing worktree (e.g., after a reboot). Reads port configuration from the existing `.env` file.
+Re-creates the tmux session and server for an existing worktree (e.g., after a reboot). Reads port configuration from the existing `.env` file and makes sure the workspace's hostname is registered with Caddy.
 
 ### Stop a workspace
 
@@ -192,7 +204,8 @@ This will:
 3. Kill the tmux session
 4. Confirm, then remove the git worktree
 5. Move any Claude Code sessions to the main project (so they appear in `claude resume`)
-6. Confirm, then optionally delete the branch
+6. Remove the workspace's hostname from Caddy
+7. Confirm, then optionally delete the branch
 
 Because `docs/local` is gitignored, real files there would be lost with the worktree. The rescue prompt copies only real files (symlinks inside `docs/local` point to shared locations that survive deletion, so they're left alone) and defaults to **abort**, so a stray keypress never deletes anything. The feature scratchpad is excluded — it's throwaway by design and deleted with the worktree without prompting (this also covers older workspaces that kept it in `docs/local`).
 
@@ -218,7 +231,7 @@ workspace list myapp --pr   # Specific project with PR status
 workspace list --recent     # Sort by last active across projects
 ```
 
-Shows all active worktrees (including main if initialized) with their tmux status. Use `--pr` to include PR status (open/merged/closed) via GitHub CLI. The **Status** column reports the state of each workspace's Claude Code session (see below).
+Shows all active worktrees (including main if initialized) with their hostname and tmux status. Use `--pr` to include PR status (open/merged/closed) via GitHub CLI. The **Status** column reports the state of each workspace's Claude Code session (see below).
 
 The **Last active** column shows when each workspace was last worked on — the newer of its latest Claude Code session activity and its latest git operation (commit/checkout/pull). Within each project, rows sort most-recent-first; `--recent` drops the project grouping and sorts the whole list most-recent-first instead, which is handy after a reboot to see what you had open. Recent activity shows as relative time (`14m ago`, `2d ago`), older activity as a date (`Jun 12`), and a blank means no signal (never used with Claude, no local git activity).
 
@@ -237,12 +250,12 @@ Each workspace's Claude Code session reports what it's doing, so you can glance 
 **In `workspace list`**, as a Status column:
 
 ```
-Project  Workspace   Branch     Tmux     Last active  Status
--------------------------------------------------------------
-myapp    main        main       running  2m ago       ● working
-myapp    checkout    checkout   running  8m ago       ▲ needs you
-myapp    search      search-ui  running  1h ago       ○ idle
-myapp    invoices    invoices            Jun 12
+Project  Workspace   Branch     Host                  Tmux     Last active  Status
+-----------------------------------------------------------------------------------
+myapp    main        main       main.myapp.test       running  2m ago       ● working
+myapp    checkout    checkout   checkout.myapp.test   running  8m ago       ▲ needs you
+myapp    search      search-ui  search.myapp.test     running  1h ago       ○ idle
+myapp    invoices    invoices   invoices.myapp.test            Jun 12
 ```
 
 - **● working** — a prompt is being worked on
@@ -275,7 +288,84 @@ workspace ports              # All workspaces
 workspace ports --running    # Only workspaces with an active tmux session
 ```
 
-Shows Rails port, Vite port, and Redis DB for all workspaces. Use `--running` to limit the table to workspaces that currently have a running tmux session.
+Shows Rails port, Vite port, Redis DB, and hostname for all workspaces. Use `--running` to limit the table to workspaces that currently have a running tmux session.
+
+## Hostnames
+
+A port number doesn't tell you which project or workspace you're looking at. So on top of `http://localhost:<port>`, every workspace also answers at a readable hostname:
+
+| Workspace                      | Hostname                       |
+|--------------------------------|--------------------------------|
+| `workspace new myapp my-feature` | `http://my-feature.myapp.test` |
+| `workspace new myapp main`       | `http://main.myapp.test`       |
+
+The hostname is a layer on top of the port — ports are assigned exactly as before and remain the source of truth. The hostname key is the worktree directory name (the same key the tmux session uses), lowercased and reduced to `[a-z0-9-]`, so a branch called `Feature/Foo_bar` becomes `feature-foo-bar.myapp.test`.
+
+Two pieces make this work:
+
+1. **DNS** — dnsmasq answers `127.0.0.1` for every `*.test` name (a wildcard; `/etc/hosts` can't do that).
+2. **Routing** — Caddy listens on `:80` and picks the workspace's Rails port from the `Host` header. The tool writes one small snippet per workspace into `~/.workspaces/caddy/` and reloads Caddy whenever a workspace is created, resumed, or deleted.
+
+Caddy being absent or stopped is only ever a warning: the port URL keeps working, and the snippets get written regardless so they're ready when Caddy is.
+
+### Setup
+
+Once per machine:
+
+```bash
+# 1. Wildcard DNS for .test (skip if `dscacheutil -q host -a name foo.test` already says 127.0.0.1)
+brew install dnsmasq
+echo 'address=/.test/127.0.0.1' >> /opt/homebrew/etc/dnsmasq.conf
+sudo brew services start dnsmasq
+sudo mkdir -p /etc/resolver
+echo 'nameserver 127.0.0.1' | sudo tee /etc/resolver/test
+
+# 2. Caddy, importing the tool's snippet directory
+brew install caddy            # or `brew upgrade caddy` if it's old
+cat > /opt/homebrew/etc/Caddyfile << 'EOF'
+import /Users/<you>/.workspaces/caddy/*.caddy
+EOF
+brew services start caddy     # user-level service; macOS lets it bind :80 without root
+
+# 3. Generate snippets for the workspaces you already have
+workspace caddy-sync
+```
+
+Then, once per Rails app, allow `.test` hostnames in `config/environments/development.rb`:
+
+```ruby
+config.hosts << /\A[a-z0-9.-]+\.test\z/i   # <feature>.<project>.test
+```
+
+It has to be a regex: a leading-dot string like `".test"` only allows one subdomain level (`foo.test`), and workspace hostnames have two. Without the line Rails answers with its "Blocked host" page — which at least proves the request reached the right app.
+
+If the app uses Vite (via `vite_ruby`), also point the HMR client at localhost in `vite.config.*`:
+
+```js
+server: {
+  hmr: { host: 'localhost' },
+}
+```
+
+Assets already go through Rails' Vite proxy, which rewrites the host, but the HMR websocket connects straight to the Vite port using the page's hostname. Vite 5.4.12+/6.0.9+ rejects that connection unless the host is localhost or listed in `server.allowedHosts`, so without this line the page renders but hot reload silently stops working on `.test` URLs.
+
+Things that need real domains (Wistia's domain allowlist, for one) won't be satisfied by `.test`; for those, keep using an `/etc/hosts` entry plus the app's trusted-host env var by hand.
+
+### Keeping snippets in sync
+
+```bash
+workspace caddy-sync
+```
+
+Regenerates every snippet from the worktrees on disk (reading each one's `RAILS_PORT`), removes snippets for workspaces that no longer exist, and reloads Caddy. It never touches the worktrees themselves. Run it after setting Caddy up for the first time, or any time hostnames and ports seem out of step. Snippets carry a `# Managed by workspace` header; any other `.caddy` file you put in the directory is left alone.
+
+### Rollback
+
+```bash
+brew services stop caddy
+```
+
+Everything is exactly as it was: workspaces keep running on their ports, and the tool just prints a one-line warning when it can't reach Caddy. Delete `~/.workspaces/caddy/` and the `import` line if you want the config gone too.
 
 ## Workspace Layout
 
@@ -308,3 +398,5 @@ Each workspace automatically gets:
 - `REDIS_URL` - unique Redis DB (`redis://localhost:6379/<N>`)
 
 This allows running multiple workspaces simultaneously without conflicts.
+
+The hostname is not written to `.env` — it's derived from the project and workspace names, and Caddy maps it to `RAILS_PORT`.
