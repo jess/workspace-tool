@@ -244,7 +244,8 @@ Each workspace's Claude Code session reports what it's doing, so you can glance 
 ```
 (0) + ● tract-main: 2 windows
 (1) + ▲ epub-appraisal: 2 windows (attached)
-(2) + ○ epub-support-plan: 2 windows
+(2) + ◇ epub-billing: 2 windows
+(3) + ○ epub-support-plan: 2 windows
 ```
 
 **In `workspace list`**, as a Status column:
@@ -254,12 +255,14 @@ Project  Workspace   Branch     Host                  Tmux     Last active  Stat
 -----------------------------------------------------------------------------------
 myapp    main        main       main.myapp.test       running  2m ago       ● working
 myapp    checkout    checkout   checkout.myapp.test   running  8m ago       ▲ needs you
+myapp    billing     billing    billing.myapp.test    running  4m ago       ◇ waiting
 myapp    search      search-ui  search.myapp.test     running  1h ago       ○ idle
 myapp    invoices    invoices   invoices.myapp.test            Jun 12
 ```
 
 - **● working** — a prompt is being worked on
 - **▲ needs you** — blocked on a permission prompt, or the turn just finished
+- **◇ waiting** — paused on background work (CI, a deploy, a long shell job, a subagent) — it'll wake itself up
 - **○ idle** — session started, nothing in flight
 - *(blank)* — no live session, or no Claude session reporting
 
@@ -272,6 +275,8 @@ workspace install-hooks
 ```
 
 This merges a small set of hooks into `~/.claude/settings.json` — non-destructively (existing hooks are preserved) and idempotently (re-running won't duplicate). Each Claude session then records its state in its tmux session's `@agent_status` user option. Nothing is written to disk, and nothing happens when `claude` runs outside tmux.
+
+The `Stop` hook is the only one that looks at what Claude hands it: Claude Code passes a `background_tasks[]` array on stdin, and a non-empty one means the turn ended only because the session is parked waiting for background work to wake it. That's ◇ rather than ▲. It's read with `jq`; if `jq` isn't on the session's `PATH`, the hook just falls back to ▲.
 
 `workspace list` reads that option automatically. To also show it in the tmux session chooser, add the binding `install-hooks` prints to your `~/.tmux.conf`:
 
