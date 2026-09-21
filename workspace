@@ -1962,6 +1962,10 @@ cmd_info() {
 # there is nothing to report. The status glyph lives in the session's
 # @agent_status user option, set by the Claude Code hooks that `workspace
 # install-hooks` installs. The same option feeds the tmux session chooser.
+#
+# A session can hold several claudes (one per window), so the session-level
+# option is a rollup: the most urgent glyph among its windows, not the most
+# recent one. Per-window state lives in each window's own @agent_status.
 agent_status_token() {
     local tmux_session="$1"
 
@@ -2526,11 +2530,28 @@ cmd_install_hooks() {
         exit 1
     fi
 
-    # Each hook sets the status glyph on its own tmux session (found via the
-    # inherited $TMUX_PANE), so nothing happens when claude runs outside tmux.
-    # The trailing comment tags our commands so re-installs can find/replace them.
-    local pre='[ -n "$TMUX_PANE" ] && tmux set-option -t "$TMUX_PANE" @agent_status "'
-    local suf='" 2>/dev/null # workspace-tool-agent-state'
+    # Each hook records the glyph on its own WINDOW (found via the inherited
+    # $TMUX_PANE), so nothing happens when claude runs outside tmux. The
+    # trailing comment tags our commands so re-installs can find/replace them.
+    #
+    # Window scope, not session scope: a tmux session can hold more than one
+    # claude — the control room runs several, one per window — and they all
+    # inherit the same session. A session-scoped write means whichever claude
+    # moved last wins, so a session going ○ idle silently erases another
+    # window's ▲. The glyph that means "go look at this" is the one most
+    # likely to be clobbered, because ○ and ● fire constantly.
+    local guard='[ -n "$TMUX_PANE" ] || exit 0'
+
+    # ...then roll the session up to the most urgent glyph among its windows,
+    # so `workspace list` and the chooser keep answering the question they are
+    # actually asked: does anything in here need me? Priority is
+    # ▲ needs you > ◇ waiting > ● working > ○ idle. list-windows resolves a
+    # pane id to its session, and costs ~6ms, so this stays inline rather than
+    # shelling out to a helper on every PostToolUse.
+    local roll='a=$(tmux list-windows -t "$TMUX_PANE" -F "#{@agent_status}" 2>/dev/null | tr -d "\n"); s=; for p in ▲ ◇ ● ○; do case "$a" in *"$p"*) s="$p"; break ;; esac; done; tmux set-option -t "$TMUX_PANE" @agent_status "$s" 2>/dev/null'
+
+    local pre="$guard"'; tmux set-option -w -t "$TMUX_PANE" @agent_status "'
+    local suf='" 2>/dev/null; '"$roll"' # workspace-tool-agent-state'
 
     # Stop is the exception to the pre/suf shape, so it gets spelled out in
     # full. A turn also "ends" while claude sits waiting on background work (a
@@ -2540,7 +2561,7 @@ cmd_install_hooks() {
     # distinction; non-empty means in flight. It is optional in the schema, so
     # a missing key has to read as empty. If jq isn't on the session's PATH the
     # && never fires and the glyph falls back to ▲ — the old behaviour.
-    local stop='g=▲; jq -e "(.background_tasks // []) | length > 0" >/dev/null 2>&1 && g=◇; [ -n "$TMUX_PANE" ] && tmux set-option -t "$TMUX_PANE" @agent_status "$g" 2>/dev/null # workspace-tool-agent-state'
+    local stop="$guard"'; g=▲; jq -e "(.background_tasks // []) | length > 0" >/dev/null 2>&1 && g=◇; tmux set-option -w -t "$TMUX_PANE" @agent_status "$g" 2>/dev/null; '"$roll"' # workspace-tool-agent-state'
 
     local tmp
     tmp=$(mktemp)
@@ -2580,6 +2601,13 @@ cmd_install_hooks() {
     echo "session chooser (prefix + s), add this to your ~/.tmux.conf:"
     echo ""
     echo -e "  ${BLUE}bind s choose-tree -Zs -F \"$TMUX_CHOOSER_FORMAT\"${NC}"
+    echo ""
+    echo "Each claude reports on its own window, and the session shows the most"
+    echo "urgent glyph among them — so a session running several claudes says"
+    echo "'needs you' whenever any one of them does. To see them individually,"
+    echo "put the glyph in your window list too:"
+    echo ""
+    echo -e "  ${BLUE}set -g window-status-format '#I #{?#{@agent_status},#{@agent_status} ,}#W'${NC}"
     echo ""
     echo -e "${YELLOW}Only claude sessions started from now on will report status.${NC}"
     echo "Restart claude in any running workspace to pick it up."
