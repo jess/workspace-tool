@@ -1970,6 +1970,7 @@ agent_status_token() {
     case "$(tmux show-options -t "$tmux_session" -v @agent_status 2>/dev/null)" in
         ●) echo "working" ;;
         ▲) echo "needs-you" ;;
+        ◇) echo "waiting" ;;
         ○) echo "idle" ;;
         *) echo "~" ;;
     esac
@@ -2211,6 +2212,7 @@ cmd_list() {
     body=$(echo "$body" \
         | sed -E 's/needs-you[[:space:]]*$/▲ needs you/' \
         | sed -E 's/working[[:space:]]*$/● working/' \
+        | sed -E 's/waiting[[:space:]]*$/◇ waiting/' \
         | sed -E 's/idle[[:space:]]*$/○ idle/')
     table=$(printf "%s\n%s\n%s" "$header_line" "$separator" "$body")
     echo "$table" | gum style \
@@ -2490,8 +2492,19 @@ cmd_resume_all() {
 # ============================================================================
 
 # The tmux choose-tree line format that surfaces @agent_status in the session
-# chooser (prefix + s). Prepends the status glyph to the default-ish line.
-readonly TMUX_CHOOSER_FORMAT='#{?#{@agent_status},#{@agent_status} ,}#{session_name}: #{session_windows} windows#{?session_attached, (attached),}'
+# chooser (prefix + s).
+#
+# choose-tree builds each line as "(key) + <session_name>: " and only THEN
+# appends this format, so anything here lands to the right of a name whose
+# width varies — there is no way to get the glyph into a flush-left column
+# short of -K, which would cost the (0)-(9) jump keys. So this stays lean and
+# says only what the name and the tree prefix don't: the glyph, and whether
+# the session is attached. Repeating #{session_name} here just printed it
+# twice, and the window count was noise crowding the glyph.
+#
+# The nested conditional keeps the spacing right in all four combinations:
+# "▲ (attached)", "▲", "(attached)", "".
+readonly TMUX_CHOOSER_FORMAT='#{?#{@agent_status},#{@agent_status}#{?session_attached, ,},}#{?session_attached,(attached),}'
 
 # Install Claude Code hooks into ~/.claude/settings.json so that every claude
 # session records its current state in its tmux session's @agent_status option.
@@ -2519,6 +2532,16 @@ cmd_install_hooks() {
     local pre='[ -n "$TMUX_PANE" ] && tmux set-option -t "$TMUX_PANE" @agent_status "'
     local suf='" 2>/dev/null # workspace-tool-agent-state'
 
+    # Stop is the exception to the pre/suf shape, so it gets spelled out in
+    # full. A turn also "ends" while claude sits waiting on background work (a
+    # detached shell job, a subagent, a workflow) — that is paused, not done,
+    # and painting ▲ there says "needs you" when nothing does. Claude Code
+    # hands the Stop hook a background_tasks[] array on stdin for exactly this
+    # distinction; non-empty means in flight. It is optional in the schema, so
+    # a missing key has to read as empty. If jq isn't on the session's PATH the
+    # && never fires and the glyph falls back to ▲ — the old behaviour.
+    local stop='g=▲; jq -e "(.background_tasks // []) | length > 0" >/dev/null 2>&1 && g=◇; [ -n "$TMUX_PANE" ] && tmux set-option -t "$TMUX_PANE" @agent_status "$g" 2>/dev/null # workspace-tool-agent-state'
+
     local tmp
     tmp=$(mktemp)
     if jq \
@@ -2526,6 +2549,7 @@ cmd_install_hooks() {
         --arg needs   "${pre}▲${suf}" \
         --arg idle    "${pre}○${suf}" \
         --arg clear   "${pre}${suf}" \
+        --arg stop    "$stop" \
         '
         def group(cmd): { hooks: [ { type: "command", command: cmd } ] };
         def mine: ([.hooks[]?.command // ""] | any(test("workspace-tool-agent-state")));
@@ -2534,7 +2558,7 @@ cmd_install_hooks() {
         | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [group($working)])
         | .hooks.PostToolUse      = ((.hooks.PostToolUse      // []) + [group($working)])
         | .hooks.Notification     = ((.hooks.Notification     // []) + [group($needs)])
-        | .hooks.Stop             = ((.hooks.Stop             // []) + [group($needs)])
+        | .hooks.Stop             = ((.hooks.Stop             // []) + [group($stop)])
         | .hooks.SessionStart     = ((.hooks.SessionStart     // []) + [group($idle)])
         | .hooks.SessionEnd       = ((.hooks.SessionEnd       // []) + [group($clear)])
         ' "$settings" > "$tmp" && [[ -s "$tmp" ]]; then
@@ -2549,6 +2573,7 @@ cmd_install_hooks() {
     echo ""
     echo "  ● working    a prompt is being worked on"
     echo "  ▲ needs you  waiting on permission, or the turn just finished"
+    echo "  ◇ waiting    paused on background work (CI, deploy, subagent)"
     echo "  ○ idle       session started, nothing in flight"
     echo ""
     echo "Status now shows in 'workspace list'. To also show it in the tmux"
