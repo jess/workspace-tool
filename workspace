@@ -2492,8 +2492,19 @@ cmd_resume_all() {
 # ============================================================================
 
 # The tmux choose-tree line format that surfaces @agent_status in the session
-# chooser (prefix + s). Prepends the status glyph to the default-ish line.
-readonly TMUX_CHOOSER_FORMAT='#{?#{@agent_status},#{@agent_status} ,}#{session_name}: #{session_windows} windows#{?session_attached, (attached),}'
+# chooser (prefix + s).
+#
+# choose-tree builds each line as "(key) + <session_name>: " and only THEN
+# appends this format, so anything here lands to the right of a name whose
+# width varies — there is no way to get the glyph into a flush-left column
+# short of -K, which would cost the (0)-(9) jump keys. So this stays lean and
+# says only what the name and the tree prefix don't: the glyph, and whether
+# the session is attached. Repeating #{session_name} here just printed it
+# twice, and the window count was noise crowding the glyph.
+#
+# The nested conditional keeps the spacing right in all four combinations:
+# "▲ (attached)", "▲", "(attached)", "".
+readonly TMUX_CHOOSER_FORMAT='#{?#{@agent_status},#{@agent_status}#{?session_attached, ,},}#{?session_attached,(attached),}'
 
 # Install Claude Code hooks into ~/.claude/settings.json so that every claude
 # session records its current state in its tmux session's @agent_status option.

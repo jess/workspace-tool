@@ -242,10 +242,11 @@ Each workspace's Claude Code session reports what it's doing, so you can glance 
 **In the tmux session chooser** (`prefix + s`) — usually where you decide what to jump into next:
 
 ```
-(0) + ● tract-main: 2 windows
-(1) + ▲ epub-appraisal: 2 windows (attached)
-(2) + ◇ epub-billing: 2 windows
-(3) + ○ epub-support-plan: 2 windows
+(0) + tract-main: ●
+(1) + epub-appraisal: ▲ (attached)
+(2) + epub-billing: ◇
+(3) + epub-support-plan: ○
+(4) + scratch:
 ```
 
 **In `workspace list`**, as a Status column:
@@ -281,8 +282,12 @@ The `Stop` hook is the only one that looks at what Claude hands it: Claude Code 
 `workspace list` reads that option automatically. To also show it in the tmux session chooser, add the binding `install-hooks` prints to your `~/.tmux.conf`:
 
 ```tmux
-bind s choose-tree -Zs -F "#{?#{@agent_status},#{@agent_status} ,}#{session_name}: #{session_windows} windows#{?session_attached, (attached),}"
+bind s choose-tree -Zs -F "#{?#{@agent_status},#{@agent_status}#{?session_attached, ,},}#{?session_attached,(attached),}"
 ```
+
+The format is deliberately lean. `choose-tree` builds each line as `(key) + <session_name>: ` itself and only *then* appends `-F`, so the format can only ever add to the right of the name — printing `#{session_name}` there just showed it twice, and a window count only pushed the glyph further out. What's left says only what the line doesn't already: the glyph, and whether the session is attached.
+
+Getting the glyphs into a flush-left column would mean `-K`, which overrides the `(0)`-`(9)` shortcut column — and since `-K` sets the *actual* hotkey, not just its label, that trades instant-jump for alignment. Not worth it.
 
 Only sessions **started after** installing the hooks report status — restart `claude` in any already-running workspace to pick it up.
 
