@@ -275,7 +275,25 @@ Install the hooks once (requires `jq`):
 workspace install-hooks
 ```
 
-This merges a small set of hooks into `~/.claude/settings.json` — non-destructively (existing hooks are preserved) and idempotently (re-running won't duplicate). Each Claude session then records its state in its tmux session's `@agent_status` user option. Nothing is written to disk, and nothing happens when `claude` runs outside tmux.
+This merges a small set of hooks into `~/.claude/settings.json` — non-destructively (existing hooks are preserved) and idempotently (re-running won't duplicate). Each Claude session then records its state in its tmux **window's** `@agent_status` user option. Nothing is written to disk, and nothing happens when `claude` runs outside tmux.
+
+#### More than one Claude in a session
+
+A tmux session can hold several Claude sessions — a control room typically runs one per window. They all share a session, so if each wrote its glyph at session scope, whichever moved last would win: a session going ○ idle would silently erase another window's ▲. The glyph that means *go look at this* is the one most likely to be clobbered, because ○ and ● fire constantly.
+
+So each Claude records on its own window, and the session shows the **most urgent glyph among its windows** — ▲ needs you > ◇ waiting > ● working > ○ idle. A session line therefore answers the question it's actually asked: *does anything in here need me?*
+
+To see them individually as well, put the glyph in your window list:
+
+```tmux
+set -g window-status-format '#I #{?#{@agent_status},#{@agent_status} ,}#W'
+```
+
+```
+ me    0 ● tract-bot │ 1 ▲ organic-call │ 2 ◇ ec2-instance │ 3 ○ auburn-canvas
+```
+
+(Two Claude sessions in two *panes* of the same window still collide — the last one to move wins. One per window is the assumption.)
 
 The `Stop` hook is the only one that looks at what Claude hands it: Claude Code passes a `background_tasks[]` array on stdin, and a non-empty one means the turn ended only because the session is parked waiting for background work to wake it. That's ◇ rather than ▲. It's read with `jq`; if `jq` isn't on the session's `PATH`, the hook just falls back to ▲.
 
